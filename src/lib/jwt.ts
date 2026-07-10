@@ -4,6 +4,7 @@ import type { Role } from "@prisma/client";
 export interface TokenPayload {
   sub: string;
   role: Role;
+  kitchen?: string | null;
 }
 
 export function signToken(payload: TokenPayload): string {

@@ -29,8 +29,8 @@ function serializeOrder<T extends { totalAmount: unknown; items: { priceAtOrder:
 ordersRouter.post("/", requireAuth("STUDENT"), async (req, res, next) => {
   try {
     const { items } = createOrderSchema.parse(req.body);
-    const order = await createOrder({ studentId: req.user!.id, items });
-    res.status(201).json(serializeOrder(order));
+    const orders = await createOrder({ studentId: req.user!.id, items });
+    res.status(201).json(orders.map(serializeOrder));
   } catch (err) {
     next(err);
   }

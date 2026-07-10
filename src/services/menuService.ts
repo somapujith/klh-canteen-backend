@@ -1,19 +1,21 @@
 import { prisma } from "../lib/prisma.js";
 
-export async function getCategorizedMenu() {
+export async function getCategorizedMenu(kitchen?: string, isAdmin?: boolean) {
+  const where = kitchen ? { kitchen: kitchen as any } : {};
   const categories = await prisma.category.findMany({
+    where,
     orderBy: { sortOrder: "asc" },
     include: {
       items: {
-        where: { isAvailable: true },
+        where: isAdmin ? undefined : { isAvailable: true },
       },
     },
   });
   return { categories };
 }
 
-export async function createCategory(name: string, sortOrder: number) {
-  return prisma.category.create({ data: { name, sortOrder } });
+export async function createCategory(name: string, sortOrder: number, kitchen: string = "SNACKS") {
+  return prisma.category.create({ data: { name, sortOrder, kitchen: kitchen as any } });
 }
 
 export async function updateCategory(id: string, data: { name?: string; sortOrder?: number }) {

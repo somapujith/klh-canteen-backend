@@ -10,7 +10,7 @@ const tokenParamSchema = z.string().min(1);
 
 adminOrdersRouter.get("/", requireAuth("ADMIN"), async (req, res, next) => {
   try {
-    const orders = await getAllOrders();
+    const orders = await getAllOrders(req.user!.kitchen || undefined);
     // Serialize totalAmount for frontend consistency
     const serialized = orders.map((order) => ({
       ...order,
@@ -24,7 +24,7 @@ adminOrdersRouter.get("/", requireAuth("ADMIN"), async (req, res, next) => {
 
 adminOrdersRouter.get("/stats", requireAuth("ADMIN"), async (req, res, next) => {
   try {
-    const stats = await getAdminStats();
+    const stats = await getAdminStats(req.user!.kitchen || undefined);
     res.json(stats);
   } catch (err) {
     next(err);
@@ -34,7 +34,7 @@ adminOrdersRouter.get("/stats", requireAuth("ADMIN"), async (req, res, next) => 
 adminOrdersRouter.get("/scan/:token", requireAuth("ADMIN"), async (req, res, next) => {
   try {
     const token = tokenParamSchema.parse(req.params.token);
-    const order = await getOrderByToken(token);
+    const order = await getOrderByToken(token, req.user!.kitchen || undefined);
     res.json(order);
   } catch (err) {
     next(err);

@@ -52,11 +52,12 @@ async function main() {
   console.log("Seeding categories...");
   const catMap = new Map();
   
-  for (const c of categories) {
+  for (const { name, sortOrder } of categories) {
+    const kitchen = (name === "Meals") ? "MEALS" : "SNACKS";
     const created = await prisma.category.upsert({
-      where: { name: c.name },
-      update: { sortOrder: c.sortOrder },
-      create: { name: c.name, sortOrder: c.sortOrder },
+      where: { name },
+      update: { sortOrder, kitchen },
+      create: { name, sortOrder, kitchen },
     });
     catMap.set(created.name, created.id);
   }

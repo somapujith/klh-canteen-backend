@@ -23,48 +23,62 @@ export async function createOrder({ studentId, items }: CreateOrderInput) {
 
   const menuItems = await prisma.menuItem.findMany({
     where: { id: { in: items.map((i) => i.menuItemId) } },
+    include: { category: true }
   });
   if (menuItems.length !== items.length) {
     throw new ApiError(400, "INVALID_ITEM", "One or more menu items not found");
   }
 
-  let totalAmount = 0;
-  const orderItemsData = items.map((i) => {
+  const kitchenItems: Record<string, { menuItem: typeof menuItems[0], qty: number }[]> = {};
+
+  items.forEach((i) => {
     const menuItem = menuItems.find((m) => m.id === i.menuItemId)!;
-    const lineTotal = Number(menuItem.price) * i.qty;
-    totalAmount += lineTotal;
-    return { menuItemId: i.menuItemId, quantity: i.qty, priceAtOrder: menuItem.price };
+    const kitchen = menuItem.category.kitchen || "SNACKS";
+    if (!kitchenItems[kitchen]) kitchenItems[kitchen] = [];
+    kitchenItems[kitchen].push({ menuItem, qty: i.qty });
   });
 
+  const createdOrders = [];
   const weekId = getWeekId();
-  const sequence = await prisma.orderSequence.upsert({
-    where: { weekId },
-    update: { lastNumber: { increment: 1 } },
-    create: { weekId, lastNumber: 1000 },
-  });
 
-  const order = await prisma.order.create({
-    data: {
-      studentId,
-      status: "PENDING",
-      token: "placeholder",
-      orderNumber: sequence.lastNumber,
-      totalAmount: totalAmount.toFixed(2),
-      items: { create: orderItemsData },
-    },
-    include: { items: { include: { menuItem: true } } },
-  });
+  for (const [kitchen, kItems] of Object.entries(kitchenItems)) {
+    let totalAmount = 0;
+    const orderItemsData = kItems.map(({ menuItem, qty }) => {
+      totalAmount += Number(menuItem.price) * qty;
+      return { menuItemId: menuItem.id, quantity: qty, priceAtOrder: menuItem.price };
+    });
 
-  const token = signOrderToken(order.id);
-  const updated = await prisma.order.update({
-    where: { id: order.id },
-    data: { token },
-    include: { items: { include: { menuItem: true } } },
-  });
+    const sequence = await prisma.orderSequence.upsert({
+      where: { weekId },
+      update: { lastNumber: { increment: 1 } },
+      create: { weekId, lastNumber: 1000 },
+    });
 
-  const qrDataUrl = await QRCode.toDataURL(token);
+    const order = await prisma.order.create({
+      data: {
+        studentId,
+        kitchen: kitchen as any,
+        status: "PENDING",
+        token: "placeholder",
+        orderNumber: sequence.lastNumber,
+        totalAmount: totalAmount.toFixed(2),
+        items: { create: orderItemsData },
+      },
+      include: { items: { include: { menuItem: true } } },
+    });
 
-  return { ...updated, qrDataUrl };
+    const token = signOrderToken(order.id);
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      data: { token },
+      include: { items: { include: { menuItem: true } } },
+    });
+
+    const qrDataUrl = await QRCode.toDataURL(token);
+    createdOrders.push({ ...updated, qrDataUrl });
+  }
+
+  return createdOrders;
 }
 
 export async function getStudentOrders(studentId: string) {
@@ -94,7 +108,7 @@ export async function getOrderForStudent(orderId: string, studentId: string) {
   return { ...order, qrDataUrl };
 }
 
-export async function getOrderByToken(token: string) {
+export async function getOrderByToken(token: string, adminKitchen?: string) {
   const orderId = verifyOrderToken(token);
   if (!orderId) throw new ApiError(400, "INVALID_TOKEN", "Invalid or tampered QR token");
   const order = await prisma.order.findUnique({
@@ -102,17 +116,24 @@ export async function getOrderByToken(token: string) {
     include: { items: { include: { menuItem: true } }, student: true },
   });
   if (!order) throw new ApiError(404, "NOT_FOUND", "Order not found");
+  
+  if (adminKitchen && order.kitchen !== adminKitchen) {
+    throw new ApiError(403, "INVALID_KITCHEN", `This order belongs to the ${order.kitchen} kitchen.`);
+  }
+  
   return order;
 }
 
-export async function getAllOrders() {
+export async function getAllOrders(kitchen?: string) {
+  const where = kitchen ? { kitchen: kitchen as any } : {};
   return prisma.order.findMany({
+    where,
     orderBy: { createdAt: "desc" },
     include: { items: { include: { menuItem: true } }, student: true },
   });
 }
 
-export async function getAdminStats() {
+export async function getAdminStats(kitchen?: string) {
   const now = new Date();
   // Using local timezone roughly by taking midnight of current UTC day
   const startOfDay = new Date();
@@ -123,6 +144,7 @@ export async function getAdminStats() {
 
   const todaysOrders = await prisma.order.findMany({
     where: {
+      ...(kitchen ? { kitchen: kitchen as any } : {}),
       createdAt: {
         gte: startOfDay,
         lte: endOfDay,

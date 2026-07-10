@@ -12,6 +12,6 @@ export async function login(identifier: string, password: string) {
   const valid = await bcrypt.compare(password, user.passwordHash);
   if (!valid) throw new ApiError(401, "INVALID_CREDENTIALS", "Invalid credentials");
 
-  const token = signToken({ sub: user.id, role: user.role });
-  return { token, role: user.role, name: user.name };
+  const token = signToken({ sub: user.id, role: user.role, kitchen: user.kitchen });
+  return { token, role: user.role, name: user.name, kitchen: user.kitchen };
 }

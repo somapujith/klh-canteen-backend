@@ -26,7 +26,7 @@ const idParamSchema = z.string().uuid();
 adminMenuRouter.post("/categories", requireAuth("ADMIN"), async (req, res, next) => {
   try {
     const { name, sortOrder } = categorySchema.parse(req.body);
-    const category = await createCategory(name, sortOrder);
+    const category = await createCategory(name, sortOrder, req.user!.kitchen || "SNACKS");
     res.status(201).json(category);
   } catch (err) {
     next(err);

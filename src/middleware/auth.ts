@@ -6,7 +6,7 @@ import { ApiError } from "./errorHandler.js";
 declare global {
   namespace Express {
     interface Request {
-      user?: { id: string; role: Role };
+      user?: { id: string; role: Role; kitchen?: string | null };
     }
   }
 }
@@ -22,7 +22,7 @@ export function requireAuth(...roles: Role[]) {
       if (roles.length > 0 && !roles.includes(payload.role)) {
         return next(new ApiError(403, "FORBIDDEN", "Insufficient role"));
       }
-      req.user = { id: payload.sub, role: payload.role };
+      req.user = { id: payload.sub, role: payload.role, kitchen: payload.kitchen };
       next();
     } catch {
       next(new ApiError(401, "INVALID_TOKEN", "Invalid or expired token"));
