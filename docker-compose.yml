@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: klh
+      POSTGRES_PASSWORD: klh
+      POSTGRES_DB: klh_canteen
+    ports:
+      - "5433:5432"
+    volumes:
+      - klh_pg_data:/var/lib/postgresql/data
+
+volumes:
+  klh_pg_data:
