@@ -5,6 +5,7 @@ import { menuRouter } from "./routes/menu.js";
 import { adminMenuRouter } from "./routes/adminMenu.js";
 import { adminStudentsRouter } from "./routes/adminStudents.js";
 import { ordersRouter } from "./routes/orders.js";
+import { adminOrdersRouter } from "./routes/adminOrders.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
 export function createApp(): Express {
@@ -21,6 +22,7 @@ export function createApp(): Express {
   app.use("/admin", adminMenuRouter);
   app.use("/admin/students", adminStudentsRouter);
   app.use("/orders", ordersRouter);
+  app.use("/admin/orders", adminOrdersRouter);
 
   app.use(errorHandler);
 
