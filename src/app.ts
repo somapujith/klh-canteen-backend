@@ -1,6 +1,8 @@
 import express, { Express } from "express";
 import cors from "cors";
 import { authRouter } from "./routes/auth.js";
+import { menuRouter } from "./routes/menu.js";
+import { adminMenuRouter } from "./routes/adminMenu.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
 export function createApp(): Express {
@@ -13,6 +15,8 @@ export function createApp(): Express {
   });
 
   app.use("/auth", authRouter);
+  app.use("/menu", menuRouter);
+  app.use("/admin", adminMenuRouter);
 
   app.use(errorHandler);
 
