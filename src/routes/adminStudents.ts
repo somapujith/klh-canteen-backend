@@ -5,7 +5,7 @@ import { importStudentsFromCsv } from "../services/studentImportService.js";
 
 export const adminStudentsRouter = Router();
 
-const bulkSchema = z.object({ csv: z.string().min(1) });
+const bulkSchema = z.object({ csv: z.string().min(1).max(500_000) });
 
 adminStudentsRouter.post("/bulk", requireAuth("ADMIN"), async (req, res, next) => {
   try {
