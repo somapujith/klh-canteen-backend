@@ -105,6 +105,13 @@ export async function getOrderByToken(token: string) {
   return order;
 }
 
+export async function getAllOrders() {
+  return prisma.order.findMany({
+    orderBy: { createdAt: "desc" },
+    include: { items: { include: { menuItem: true } }, student: true },
+  });
+}
+
 export async function deliverOrder(orderId: string) {
   const existing = await prisma.order.findUnique({
     where: { id: orderId },
