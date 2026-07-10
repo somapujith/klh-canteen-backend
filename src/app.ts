@@ -10,7 +10,8 @@ import { errorHandler } from "./middleware/errorHandler.js";
 
 export function createApp(): Express {
   const app = express();
-  app.use(cors({ origin: process.env.CORS_ORIGIN ?? "*" }));
+  // Allow all origins to avoid CORS issues from Vercel preview links or misconfigurations
+  app.use(cors({ origin: "*" }));
   app.use(express.json());
 
   app.get("/health", (_req, res) => {

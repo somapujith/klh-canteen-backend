@@ -8,6 +8,16 @@ interface CreateOrderInput {
   items: { menuItemId: string; qty: number }[];
 }
 
+function getWeekId(): string {
+  const d = new Date();
+  d.setUTCHours(0, 0, 0, 0);
+  const day = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - day);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+  return `${d.getUTCFullYear()}-W${weekNo.toString().padStart(2, '0')}`;
+}
+
 export async function createOrder({ studentId, items }: CreateOrderInput) {
   if (items.length === 0) throw new ApiError(400, "EMPTY_ORDER", "Order must have at least one item");
 
@@ -26,11 +36,19 @@ export async function createOrder({ studentId, items }: CreateOrderInput) {
     return { menuItemId: i.menuItemId, quantity: i.qty, priceAtOrder: menuItem.price };
   });
 
+  const weekId = getWeekId();
+  const sequence = await prisma.orderSequence.upsert({
+    where: { weekId },
+    update: { lastNumber: { increment: 1 } },
+    create: { weekId, lastNumber: 1000 },
+  });
+
   const order = await prisma.order.create({
     data: {
       studentId,
       status: "PENDING",
       token: "placeholder",
+      orderNumber: sequence.lastNumber,
       totalAmount: totalAmount.toFixed(2),
       items: { create: orderItemsData },
     },
@@ -50,11 +68,19 @@ export async function createOrder({ studentId, items }: CreateOrderInput) {
 }
 
 export async function getStudentOrders(studentId: string) {
-  return prisma.order.findMany({
+  const orders = await prisma.order.findMany({
     where: { studentId },
     orderBy: { createdAt: "desc" },
     include: { items: { include: { menuItem: true } } },
   });
+  
+  // Attach qrDataUrl to each order so the history can display it if needed
+  return Promise.all(
+    orders.map(async (order) => {
+      const qrDataUrl = await QRCode.toDataURL(order.token);
+      return { ...order, qrDataUrl };
+    })
+  );
 }
 
 export async function getOrderForStudent(orderId: string, studentId: string) {
@@ -63,7 +89,9 @@ export async function getOrderForStudent(orderId: string, studentId: string) {
     include: { items: { include: { menuItem: true } } },
   });
   if (!order) throw new ApiError(404, "NOT_FOUND", "Order not found");
-  return order;
+  
+  const qrDataUrl = await QRCode.toDataURL(order.token);
+  return { ...order, qrDataUrl };
 }
 
 export async function getOrderByToken(token: string) {
