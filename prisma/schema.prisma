@@ -1,0 +1,69 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  STUDENT
+  ADMIN
+}
+
+enum OrderStatus {
+  PENDING
+  DELIVERED
+}
+
+model User {
+  id           String   @id @default(uuid())
+  role         Role
+  rollNumber   String?  @unique
+  email        String   @unique
+  passwordHash String
+  name         String
+  createdAt    DateTime @default(now())
+  orders       Order[]
+}
+
+model Category {
+  id        String     @id @default(uuid())
+  name      String     @unique
+  sortOrder Int        @default(0)
+  items     MenuItem[]
+}
+
+model MenuItem {
+  id          String      @id @default(uuid())
+  name        String
+  imageUrl    String
+  price       Decimal     @db.Decimal(10, 2)
+  stockQty    Int
+  isAvailable Boolean     @default(true)
+  categoryId  String
+  category    Category    @relation(fields: [categoryId], references: [id])
+  orderItems  OrderItem[]
+}
+
+model Order {
+  id          String      @id @default(uuid())
+  studentId   String
+  student     User        @relation(fields: [studentId], references: [id])
+  status      OrderStatus @default(PENDING)
+  token       String      @unique
+  totalAmount Decimal     @db.Decimal(10, 2)
+  createdAt   DateTime    @default(now())
+  deliveredAt DateTime?
+  items       OrderItem[]
+}
+
+model OrderItem {
+  id           String   @id @default(uuid())
+  orderId      String
+  order        Order    @relation(fields: [orderId], references: [id])
+  menuItemId   String
+  menuItem     MenuItem @relation(fields: [menuItemId], references: [id])
+  quantity     Int
+  priceAtOrder Decimal  @db.Decimal(10, 2)
+}
