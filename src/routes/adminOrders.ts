@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { requireAuth } from "../middleware/auth.js";
-import { getOrderByToken, deliverOrder, getAllOrders } from "../services/orderService.js";
+import { getOrderByToken, deliverOrder, getAllOrders, getAdminStats } from "../services/orderService.js";
 
 export const adminOrdersRouter = Router();
 
@@ -17,6 +17,15 @@ adminOrdersRouter.get("/", requireAuth("ADMIN"), async (req, res, next) => {
       totalAmount: Number(order.totalAmount).toFixed(2),
     }));
     res.json(serialized);
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminOrdersRouter.get("/stats", requireAuth("ADMIN"), async (req, res, next) => {
+  try {
+    const stats = await getAdminStats();
+    res.json(stats);
   } catch (err) {
     next(err);
   }

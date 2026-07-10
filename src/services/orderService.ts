@@ -112,6 +112,33 @@ export async function getAllOrders() {
   });
 }
 
+export async function getAdminStats() {
+  const now = new Date();
+  // Using local timezone roughly by taking midnight of current UTC day
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  
+  const endOfDay = new Date(startOfDay);
+  endOfDay.setHours(23, 59, 59, 999);
+
+  const todaysOrders = await prisma.order.findMany({
+    where: {
+      createdAt: {
+        gte: startOfDay,
+        lte: endOfDay,
+      }
+    }
+  });
+
+  const totalOrdersToday = todaysOrders.length;
+  const totalRevenueToday = todaysOrders.reduce((sum, order) => sum + Number(order.totalAmount), 0);
+
+  return {
+    totalOrdersToday,
+    totalRevenueToday: totalRevenueToday.toFixed(2),
+  };
+}
+
 export async function deliverOrder(orderId: string) {
   const existing = await prisma.order.findUnique({
     where: { id: orderId },
