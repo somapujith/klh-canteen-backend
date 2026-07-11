@@ -184,22 +184,27 @@ export async function getAdminStats(kitchen?: string) {
 }
 
 export async function deliverOrder(orderId: string, adminKitchen?: string | null) {
-  const existing = await prisma.order.findUnique({
-    where: { id: orderId },
-  });
-  if (!existing) throw new ApiError(404, "NOT_FOUND", "Order not found");
+  return prisma.$transaction(async (tx) => {
+    const orders = await tx.$queryRaw<any[]>`SELECT status, kitchen FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
+    
+    if (orders.length === 0) {
+      throw new ApiError(404, "NOT_FOUND", "Order not found");
+    }
+    
+    const existing = orders[0];
 
-  if (adminKitchen && existing.kitchen !== adminKitchen) {
-    throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to deliver this kitchen's orders.");
-  }
+    if (adminKitchen && existing.kitchen !== adminKitchen) {
+      throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to deliver this kitchen's orders.");
+    }
 
-  if (existing.status === "DELIVERED") {
-    throw new ApiError(409, "ALREADY_DELIVERED", "Order was already delivered");
-  }
+    if (existing.status === "DELIVERED") {
+      throw new ApiError(409, "ALREADY_DELIVERED", "Order was already delivered");
+    }
 
-  return prisma.order.update({
-    where: { id: orderId },
-    data: { status: "DELIVERED", deliveredAt: new Date() },
-    include: { items: { include: { menuItem: true } } },
+    return tx.order.update({
+      where: { id: orderId },
+      data: { status: "DELIVERED", deliveredAt: new Date() },
+      include: { items: { include: { menuItem: true } } },
+    });
   });
 }
