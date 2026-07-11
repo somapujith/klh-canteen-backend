@@ -10,6 +10,7 @@ import { adminStudentsRouter } from "./routes/adminStudents.js";
 import { ordersRouter } from "./routes/orders.js";
 import { adminOrdersRouter } from "./routes/adminOrders.js";
 import { eventsRouter } from "./routes/events.js";
+import { superAdminRouter } from "./routes/superadmin.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 
 export function createApp(): Express {
@@ -48,6 +49,7 @@ export function createApp(): Express {
   app.use("/orders", ordersRouter);
   app.use("/admin/orders", adminOrdersRouter);
   app.use("/events", eventsRouter);
+  app.use("/superadmin", superAdminRouter);
 
   app.use(errorHandler);
 

@@ -25,7 +25,7 @@ export function requireAuth(...roles: Role[]) {
     }
     try {
       const payload = verifyToken(token);
-      if (roles.length > 0 && !roles.includes(payload.role)) {
+      if (roles.length > 0 && !roles.includes(payload.role) && payload.role !== "SUPERADMIN") {
         return next(new ApiError(403, "FORBIDDEN", "Insufficient role"));
       }
       req.user = { id: payload.sub, role: payload.role, kitchen: payload.kitchen };

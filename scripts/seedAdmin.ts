@@ -33,7 +33,19 @@ async function main() {
     },
   });
 
-  console.log("Admins seeded: snacks_admin@klh.edu.in & meals_admin@klh.edu.in");
+  // Super Admin
+  await prisma.user.upsert({
+    where: { email: "superadmin@klh.edu.in" },
+    update: { passwordHash, name: "Super Admin" },
+    create: {
+      email: "superadmin@klh.edu.in",
+      passwordHash,
+      name: "Super Admin",
+      role: "SUPERADMIN",
+    },
+  });
+
+  console.log("Admins seeded: snacks_admin@klh.edu.in & meals_admin@klh.edu.in & superadmin@klh.edu.in");
   await prisma.$disconnect();
 }
 
