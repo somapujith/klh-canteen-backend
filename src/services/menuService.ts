@@ -1,4 +1,5 @@
 import { prisma } from "../lib/prisma.js";
+import { ApiError } from "../middleware/errorHandler.js";
 
 export async function getCategorizedMenu(kitchen?: string, isAdmin?: boolean) {
   const where = kitchen ? { kitchen: kitchen as any } : {};
@@ -18,11 +19,21 @@ export async function createCategory(name: string, sortOrder: number, kitchen: s
   return prisma.category.create({ data: { name, sortOrder, kitchen: kitchen as any } });
 }
 
-export async function updateCategory(id: string, data: { name?: string; sortOrder?: number }) {
+export async function updateCategory(id: string, data: { name?: string; sortOrder?: number }, adminKitchen?: string | null) {
+  const existing = await prisma.category.findUnique({ where: { id } });
+  if (!existing) throw new ApiError(404, "NOT_FOUND", "Category not found");
+  if (adminKitchen && existing.kitchen !== adminKitchen) {
+    throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to modify this category.");
+  }
   return prisma.category.update({ where: { id }, data });
 }
 
-export async function deleteCategory(id: string) {
+export async function deleteCategory(id: string, adminKitchen?: string | null) {
+  const existing = await prisma.category.findUnique({ where: { id } });
+  if (!existing) throw new ApiError(404, "NOT_FOUND", "Category not found");
+  if (adminKitchen && existing.kitchen !== adminKitchen) {
+    throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to delete this category.");
+  }
   return prisma.category.delete({ where: { id } });
 }
 
@@ -38,11 +49,38 @@ export async function createMenuItem(data: {
 
 export async function updateMenuItem(
   id: string,
-  data: Partial<{ name: string; imageUrl: string; price: string; stockQty: number; isAvailable: boolean; categoryId: string }>
+  data: Partial<{ name: string; imageUrl: string; price: string; stockQty: number; isAvailable: boolean; categoryId: string }>,
+  adminKitchen?: string | null
 ) {
+  const existing = await prisma.menuItem.findUnique({ where: { id }, include: { category: true } });
+  if (!existing) throw new ApiError(404, "NOT_FOUND", "Menu item not found");
+  if (adminKitchen && existing.category.kitchen !== adminKitchen) {
+    throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to modify this menu item.");
+  }
   return prisma.menuItem.update({ where: { id }, data });
 }
 
-export async function deleteMenuItem(id: string) {
+export async function deleteMenuItem(id: string, adminKitchen?: string | null) {
+  const existing = await prisma.menuItem.findUnique({ where: { id }, include: { category: true } });
+  if (!existing) throw new ApiError(404, "NOT_FOUND", "Menu item not found");
+  if (adminKitchen && existing.category.kitchen !== adminKitchen) {
+    throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to delete this menu item.");
+  }
   return prisma.menuItem.delete({ where: { id } });
+}
+
+export async function bulkUpdateCategoryItems(
+  categoryId: string,
+  data: Partial<{ isAvailable: boolean; stockQty: number }>,
+  adminKitchen?: string | null
+) {
+  const category = await prisma.category.findUnique({ where: { id: categoryId } });
+  if (!category) throw new ApiError(404, "NOT_FOUND", "Category not found");
+  if (adminKitchen && category.kitchen !== adminKitchen) {
+    throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to modify this category's items.");
+  }
+  return prisma.menuItem.updateMany({
+    where: { categoryId },
+    data,
+  });
 }

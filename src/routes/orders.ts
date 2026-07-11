@@ -1,7 +1,9 @@
 import { Router } from "express";
 import { z } from "zod";
+import rateLimit from "express-rate-limit";
 import { requireAuth } from "../middleware/auth.js";
 import { createOrder, getStudentOrders, getOrderForStudent } from "../services/orderService.js";
+import { sseService } from "../services/sseService.js";
 
 export const ordersRouter = Router();
 
@@ -26,10 +28,19 @@ function serializeOrder<T extends { totalAmount: unknown; items: { priceAtOrder:
   };
 }
 
-ordersRouter.post("/", requireAuth("STUDENT"), async (req, res, next) => {
+const orderLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: { message: "Too many orders placed, please wait a minute.", code: "TOO_MANY_ORDERS" } }
+});
+
+ordersRouter.post("/", requireAuth("STUDENT"), orderLimiter, async (req, res, next) => {
   try {
     const { items } = createOrderSchema.parse(req.body);
     const orders = await createOrder({ studentId: req.user!.id, items });
+    sseService.broadcastMenuUpdate();
     res.status(201).json(orders.map(serializeOrder));
   } catch (err) {
     next(err);

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireAuth } from "../middleware/auth.js";
 import { getOrderByToken, deliverOrder, getAllOrders, getAdminStats } from "../services/orderService.js";
+import { sseService } from "../services/sseService.js";
 
 export const adminOrdersRouter = Router();
 
@@ -44,7 +45,9 @@ adminOrdersRouter.get("/scan/:token", requireAuth("ADMIN"), async (req, res, nex
 adminOrdersRouter.post("/:id/deliver", requireAuth("ADMIN"), async (req, res, next) => {
   try {
     const id = idParamSchema.parse(req.params.id);
-    const order = await deliverOrder(id);
+    const order = await deliverOrder(id, req.user!.kitchen || undefined);
+    sseService.notifyOrderUpdate(order.studentId, order.id, order.status);
+    sseService.broadcastMenuUpdate();
     res.json(order);
   } catch (err) {
     next(err);

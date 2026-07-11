@@ -21,64 +21,86 @@ function getWeekId(): string {
 export async function createOrder({ studentId, items }: CreateOrderInput) {
   if (items.length === 0) throw new ApiError(400, "EMPTY_ORDER", "Order must have at least one item");
 
-  const menuItems = await prisma.menuItem.findMany({
-    where: { id: { in: items.map((i) => i.menuItemId) } },
-    include: { category: true }
-  });
-  if (menuItems.length !== items.length) {
-    throw new ApiError(400, "INVALID_ITEM", "One or more menu items not found");
-  }
+  return prisma.$transaction(async (tx) => {
+    // 1. Lock items and check stock to prevent overselling
+    const menuItemIds = [...new Set(items.map((i) => i.menuItemId))].sort();
+    const lockedItems = await tx.$queryRaw<{ id: string; name: string; stockQty: number }[]>`
+      SELECT id, name, "stockQty" FROM "MenuItem" WHERE id = ANY(${menuItemIds}) FOR UPDATE
+    `;
+    const lockedById = new Map(lockedItems.map((item) => [item.id, item]));
 
-  const kitchenItems: Record<string, { menuItem: typeof menuItems[0], qty: number }[]> = {};
+    for (const item of items) {
+      const lockedItem = lockedById.get(item.menuItemId);
+      if (!lockedItem || lockedItem.stockQty < item.qty) {
+        throw new ApiError(409, "OUT_OF_STOCK", `Insufficient stock for ${lockedItem?.name ?? item.menuItemId}`);
+      }
+    }
 
-  items.forEach((i) => {
-    const menuItem = menuItems.find((m) => m.id === i.menuItemId)!;
-    const kitchen = menuItem.category.kitchen || "SNACKS";
-    if (!kitchenItems[kitchen]) kitchenItems[kitchen] = [];
-    kitchenItems[kitchen].push({ menuItem, qty: i.qty });
-  });
+    // 2. Decrement stock
+    for (const item of items) {
+      await tx.menuItem.update({
+        where: { id: item.menuItemId },
+        data: { stockQty: { decrement: item.qty } },
+      });
+    }
 
-  const createdOrders = [];
-  const weekId = getWeekId();
-
-  for (const [kitchen, kItems] of Object.entries(kitchenItems)) {
-    let totalAmount = 0;
-    const orderItemsData = kItems.map(({ menuItem, qty }) => {
-      totalAmount += Number(menuItem.price) * qty;
-      return { menuItemId: menuItem.id, quantity: qty, priceAtOrder: menuItem.price };
+    // 3. Re-fetch menu items to get their categories for kitchen splitting
+    const menuItems = await tx.menuItem.findMany({
+      where: { id: { in: menuItemIds } },
+      include: { category: true }
     });
 
-    const sequence = await prisma.orderSequence.upsert({
-      where: { weekId },
-      update: { lastNumber: { increment: 1 } },
-      create: { weekId, lastNumber: 1000 },
+    // 4. Split by kitchen and create orders
+    const kitchenItems: Record<string, { menuItem: typeof menuItems[0], qty: number }[]> = {};
+    items.forEach((i) => {
+      const menuItem = menuItems.find((m) => m.id === i.menuItemId)!;
+      const kitchen = menuItem.category.kitchen || "SNACKS";
+      if (!kitchenItems[kitchen]) kitchenItems[kitchen] = [];
+      kitchenItems[kitchen].push({ menuItem, qty: i.qty });
     });
 
-    const order = await prisma.order.create({
-      data: {
-        studentId,
-        kitchen: kitchen as any,
-        status: "PENDING",
-        token: "placeholder",
-        orderNumber: sequence.lastNumber,
-        totalAmount: totalAmount.toFixed(2),
-        items: { create: orderItemsData },
-      },
-      include: { items: { include: { menuItem: true } } },
-    });
+    const createdOrders = [];
+    const weekId = getWeekId();
 
-    const token = signOrderToken(order.id);
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: { token },
-      include: { items: { include: { menuItem: true } } },
-    });
+    for (const [kitchen, kItems] of Object.entries(kitchenItems)) {
+      let totalAmount = 0;
+      const orderItemsData = kItems.map(({ menuItem, qty }) => {
+        totalAmount += Number(menuItem.price) * qty;
+        return { menuItemId: menuItem.id, quantity: qty, priceAtOrder: menuItem.price };
+      });
 
-    const qrDataUrl = await QRCode.toDataURL(token);
-    createdOrders.push({ ...updated, qrDataUrl });
-  }
+      const sequence = await tx.orderSequence.upsert({
+        where: { weekId },
+        update: { lastNumber: { increment: 1 } },
+        create: { weekId, lastNumber: 1000 },
+      });
 
-  return createdOrders;
+      const order = await tx.order.create({
+        data: {
+          studentId,
+          kitchen: kitchen as any,
+          status: "PENDING",
+          token: "placeholder",
+          orderNumber: sequence.lastNumber,
+          totalAmount: totalAmount.toFixed(2),
+          items: { create: orderItemsData },
+        },
+        include: { items: { include: { menuItem: true } } },
+      });
+
+      const token = signOrderToken(order.id);
+      const updated = await tx.order.update({
+        where: { id: order.id },
+        data: { token },
+        include: { items: { include: { menuItem: true } } },
+      });
+
+      const qrDataUrl = await QRCode.toDataURL(token);
+      createdOrders.push({ ...updated, qrDataUrl });
+    }
+
+    return createdOrders;
+  }, { maxWait: 10_000, timeout: 15_000 });
 }
 
 export async function getStudentOrders(studentId: string) {
@@ -161,69 +183,23 @@ export async function getAdminStats(kitchen?: string) {
   };
 }
 
-export async function deliverOrder(orderId: string) {
+export async function deliverOrder(orderId: string, adminKitchen?: string | null) {
   const existing = await prisma.order.findUnique({
     where: { id: orderId },
-    include: { items: true },
   });
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Order not found");
 
-  return prisma.$transaction(
-    async (tx) => {
-      // Re-check status and stock INSIDE the transaction using row locks
-      // (SELECT ... FOR UPDATE), not the pre-transaction read above. Under
-      // Postgres's default READ COMMITTED isolation, a plain SELECT is an
-      // MVCC snapshot read and takes no lock, so two concurrent deliver
-      // requests for the same order (or for different orders competing for
-      // the same menu item's stock) could both pass a check based on stale
-      // data before either commits. FOR UPDATE forces the second transaction
-      // to block on the first transaction's row lock and then re-read the
-      // post-commit state, which is what actually prevents double-delivery
-      // and overselling under concurrency.
-      const lockedOrderRows = await tx.$queryRaw<{ status: string }[]>`
-        SELECT status FROM "Order" WHERE id = ${orderId} FOR UPDATE
-      `;
-      const lockedOrder = lockedOrderRows[0];
-      if (!lockedOrder) throw new ApiError(404, "NOT_FOUND", "Order not found");
-      if (lockedOrder.status === "DELIVERED") {
-        throw new ApiError(409, "ALREADY_DELIVERED", "Order was already delivered");
-      }
+  if (adminKitchen && existing.kitchen !== adminKitchen) {
+    throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to deliver this kitchen's orders.");
+  }
 
-      // Lock menu item rows in a deterministic order (sorted by id) to avoid
-      // deadlocks between concurrent transactions that touch overlapping sets
-      // of items in different orders.
-      const menuItemIds = [...new Set(existing.items.map((line) => line.menuItemId))].sort();
-      const lockedItems = await tx.$queryRaw<{ id: string; name: string; stockQty: number }[]>`
-        SELECT id, name, "stockQty" FROM "MenuItem" WHERE id = ANY(${menuItemIds}) FOR UPDATE
-      `;
-      const lockedById = new Map(lockedItems.map((item) => [item.id, item]));
+  if (existing.status === "DELIVERED") {
+    throw new ApiError(409, "ALREADY_DELIVERED", "Order was already delivered");
+  }
 
-      for (const line of existing.items) {
-        const menuItem = lockedById.get(line.menuItemId);
-        if (!menuItem || menuItem.stockQty < line.quantity) {
-          throw new ApiError(409, "OUT_OF_STOCK", `Insufficient stock for ${menuItem?.name ?? line.menuItemId}`);
-        }
-      }
-      for (const line of existing.items) {
-        await tx.menuItem.update({
-          where: { id: line.menuItemId },
-          data: { stockQty: { decrement: line.quantity } },
-        });
-      }
-      return tx.order.update({
-        where: { id: orderId },
-        data: { status: "DELIVERED", deliveredAt: new Date() },
-        include: { items: { include: { menuItem: true } } },
-      });
-    },
-    // Bursts of concurrent scans against the same order/menu item serialize
-    // on the FOR UPDATE row locks above (by design — this is what prevents
-    // overselling). Under real traffic (200+ concurrent requests, per the
-    // system's concurrency target) that queue can exceed Prisma's default
-    // 5s transaction timeout / 2s connection-acquire wait, which would
-    // otherwise surface as an opaque 500 instead of a clean, retryable
-    // response. Widen both so waiting for a lock is treated as normal
-    // backpressure, not a failure.
-    { maxWait: 10_000, timeout: 15_000 }
-  );
+  return prisma.order.update({
+    where: { id: orderId },
+    data: { status: "DELIVERED", deliveredAt: new Date() },
+    include: { items: { include: { menuItem: true } } },
+  });
 }

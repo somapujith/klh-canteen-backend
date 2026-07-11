@@ -1,5 +1,6 @@
 import type { ErrorRequestHandler } from "express";
 import { Prisma } from "@prisma/client";
+import { ZodError } from "zod";
 
 export class ApiError extends Error {
   constructor(
@@ -25,12 +26,20 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     res.status(err.status).json({ error: { message: err.message, code: err.code } });
     return;
   }
+  if (err instanceof ZodError) {
+    res.status(400).json({ error: { message: "Validation error", code: "VALIDATION_ERROR", details: err.issues } });
+    return;
+  }
   if (isRetryableTransactionError(err)) {
     res.status(409).json({
       error: { message: "Request could not be completed due to a conflicting operation; please retry", code: "CONFLICT_RETRY" },
     });
     return;
   }
-  console.error(err);
+  if (_req.log && typeof _req.log.error === 'function') {
+    _req.log.error(err);
+  } else {
+    console.error(err);
+  }
   res.status(500).json({ error: { message: "Internal server error", code: "INTERNAL" } });
 };

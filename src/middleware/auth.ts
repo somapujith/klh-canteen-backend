@@ -13,12 +13,18 @@ declare global {
 
 export function requireAuth(...roles: Role[]) {
   return (req: Request, _res: Response, next: NextFunction) => {
-    const header = req.headers.authorization;
-    if (!header?.startsWith("Bearer ")) {
+    let token = "";
+    if (req.headers.authorization?.startsWith("Bearer ")) {
+      token = req.headers.authorization.slice(7);
+    } else if (req.query.token && typeof req.query.token === "string") {
+      token = req.query.token;
+    }
+
+    if (!token) {
       return next(new ApiError(401, "NO_TOKEN", "Missing authorization token"));
     }
     try {
-      const payload = verifyToken(header.slice(7));
+      const payload = verifyToken(token);
       if (roles.length > 0 && !roles.includes(payload.role)) {
         return next(new ApiError(403, "FORBIDDEN", "Insufficient role"));
       }
