@@ -35,7 +35,7 @@ adminOrdersRouter.get("/stats", requireAuth("ADMIN"), async (req, res, next) => 
 adminOrdersRouter.get("/scan/:token", requireAuth("ADMIN"), async (req, res, next) => {
   try {
     const token = tokenParamSchema.parse(req.params.token);
-    const order = await getOrderByToken(token, req.user!.kitchen || undefined);
+    const order = await getOrderByToken(token, req.user!.kitchen || undefined, req.user!.id);
     res.json(order);
   } catch (err) {
     next(err);

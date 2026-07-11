@@ -130,7 +130,7 @@ export async function getOrderForStudent(orderId: string, studentId: string) {
   return { ...order, qrDataUrl };
 }
 
-export async function getOrderByToken(token: string, adminKitchen?: string) {
+export async function getOrderByToken(token: string, adminKitchen?: string, adminId?: string) {
   const orderId = verifyOrderToken(token);
   if (!orderId) throw new ApiError(400, "INVALID_TOKEN", "Invalid or tampered QR token");
   const order = await prisma.order.findUnique({
@@ -142,8 +142,27 @@ export async function getOrderByToken(token: string, adminKitchen?: string) {
   if (adminKitchen && order.kitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", `This order belongs to the ${order.kitchen} kitchen.`);
   }
+
+  let isLockedByOther = false;
+  if (adminId && order.status !== "DELIVERED") {
+    const now = new Date();
+    const lockTimeout = 5 * 60 * 1000; // 5 minutes
+
+    if (order.lockedByAdminId && order.lockedByAdminId !== adminId && order.lockedAt) {
+      if (now.getTime() - order.lockedAt.getTime() < lockTimeout) {
+        isLockedByOther = true;
+      }
+    }
+
+    if (!isLockedByOther) {
+      await prisma.order.update({
+        where: { id: order.id },
+        data: { lockedByAdminId: adminId, lockedAt: now }
+      });
+    }
+  }
   
-  return order;
+  return { ...order, isLockedByOther };
 }
 
 export async function getAllOrders(kitchen?: string) {
