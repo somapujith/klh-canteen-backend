@@ -13,5 +13,5 @@ export async function login(identifier: string, password: string) {
   if (!valid) throw new ApiError(401, "INVALID_CREDENTIALS", "Invalid credentials");
 
   const token = signToken({ sub: user.id, role: user.role, kitchen: user.kitchen });
-  return { token, role: user.role, name: user.name, kitchen: user.kitchen };
+  return { token, role: user.role, name: user.name, kitchen: user.kitchen, id: user.id };
 }
