@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireAuth } from "../middleware/auth.js";
 import { getOrderByToken, deliverOrder, getAllOrders, getAdminStats } from "../services/orderService.js";
 import { sseService } from "../services/sseService.js";
+import { logAction } from "../services/auditService.js";
 
 export const adminOrdersRouter = Router();
 
@@ -46,6 +47,9 @@ adminOrdersRouter.post("/:id/deliver", requireAuth("ADMIN"), async (req, res, ne
   try {
     const id = idParamSchema.parse(req.params.id);
     const order = await deliverOrder(id, req.user!.kitchen || undefined);
+    if (!req.user!.kitchen || req.user!.kitchen !== order.kitchen) {
+      await logAction(req.user!.id, "ORDER_DELIVER_OVERRIDE", "Order", order.id, { kitchen: order.kitchen });
+    }
     sseService.notifyOrderUpdate(order.studentId, order.id, order.status);
     sseService.broadcastMenuUpdate();
     res.json(order);

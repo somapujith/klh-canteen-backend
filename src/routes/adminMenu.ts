@@ -11,6 +11,7 @@ import {
   bulkUpdateCategoryItems,
 } from "../services/menuService.js";
 import { sseService } from "../services/sseService.js";
+import { logAction } from "../services/auditService.js";
 
 export const adminMenuRouter = Router();
 
@@ -50,6 +51,7 @@ adminMenuRouter.delete("/categories/:id", requireAuth("ADMIN"), async (req, res,
   try {
     const id = idParamSchema.parse(req.params.id);
     await deleteCategory(id, req.user!.kitchen || undefined);
+    await logAction(req.user!.id, "CATEGORY_DELETE", "Category", id);
     res.status(204).send();
   } catch (err) {
     next(err);
@@ -66,6 +68,7 @@ adminMenuRouter.patch("/categories/:id/bulk-items", requireAuth("ADMIN"), async 
     const id = idParamSchema.parse(req.params.id);
     const data = bulkUpdateSchema.parse(req.body);
     await bulkUpdateCategoryItems(id, data, req.user!.kitchen || undefined);
+    await logAction(req.user!.id, "CATEGORY_BULK_UPDATE", "Category", id, data);
     sseService.broadcastMenuUpdate();
     res.json({ success: true });
   } catch (err) {
@@ -100,6 +103,7 @@ adminMenuRouter.delete("/menu-items/:id", requireAuth("ADMIN"), async (req, res,
   try {
     const id = idParamSchema.parse(req.params.id);
     await deleteMenuItem(id, req.user!.kitchen || undefined);
+    await logAction(req.user!.id, "MENU_ITEM_DELETE", "MenuItem", id);
     sseService.broadcastMenuUpdate();
     res.status(204).send();
   } catch (err) {
