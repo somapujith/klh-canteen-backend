@@ -5,6 +5,7 @@ services:
     plan: free
     buildCommand: npm install && npm run build && npx prisma migrate deploy
     startCommand: npm start
+    healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
         sync: false
