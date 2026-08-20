@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { defineConfig } from "prisma/config";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaNeon } from "@prisma/adapter-neon";
 
 export default defineConfig({
   schema: "prisma/schema.prisma",
@@ -8,6 +8,6 @@ export default defineConfig({
     url: process.env.DATABASE_URL!,
   },
   migrations: {
-    adapter: async () => new PrismaPg({ connectionString: process.env.DATABASE_URL! }),
+    adapter: async () => new PrismaNeon({ connectionString: process.env.DATABASE_URL! }),
   },
 });

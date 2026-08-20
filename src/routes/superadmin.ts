@@ -1,20 +1,19 @@
-import { Router } from "express";
+import { Hono } from "hono";
 import { z } from "zod";
 import { requireAuth } from "../middleware/auth.js";
 import { getStorageStats, clearStorage } from "../services/systemService.js";
 import { logAction, getAuditLog } from "../services/auditService.js";
+import { getRequestPrisma } from "../lib/context.js";
+import type { AppEnv } from "../types.js";
 
-export const superAdminRouter = Router();
+export const superAdminRouter = new Hono<AppEnv>();
 
-superAdminRouter.use(requireAuth("SUPERADMIN"));
+superAdminRouter.use("*", requireAuth("SUPERADMIN"));
 
-superAdminRouter.get("/storage", async (req, res, next) => {
-  try {
-    const stats = await getStorageStats();
-    res.json(stats);
-  } catch (err) {
-    next(err);
-  }
+superAdminRouter.get("/storage", async (c) => {
+  const prisma = getRequestPrisma(c);
+  const stats = await getStorageStats(prisma);
+  return c.json(stats);
 });
 
 const clearStorageSchema = z.object({
@@ -22,18 +21,16 @@ const clearStorageSchema = z.object({
   retainDays: z.number().int().min(0).optional().default(0),
 });
 
-superAdminRouter.post("/storage/clear", async (req, res, next) => {
-  try {
-    const data = clearStorageSchema.parse(req.body);
-    const result = await clearStorage(data.target, data.retainDays);
-    await logAction(req.user!.id, "STORAGE_CLEAR", data.target, undefined, {
-      retainDays: data.retainDays,
-      deletedCount: result.deletedCount,
-    });
-    res.json(result);
-  } catch (err) {
-    next(err);
-  }
+superAdminRouter.post("/storage/clear", async (c) => {
+  const data = clearStorageSchema.parse(await c.req.json());
+  const prisma = getRequestPrisma(c);
+  const user = c.get("user")!;
+  const result = await clearStorage(prisma, data.target, data.retainDays);
+  await logAction(prisma, user.id, "STORAGE_CLEAR", data.target, undefined, {
+    retainDays: data.retainDays,
+    deletedCount: result.deletedCount,
+  });
+  return c.json(result);
 });
 
 const auditLogQuerySchema = z.object({
@@ -41,12 +38,12 @@ const auditLogQuerySchema = z.object({
   before: z.string().datetime().optional(),
 });
 
-superAdminRouter.get("/audit-log", async (req, res, next) => {
-  try {
-    const { limit, before } = auditLogQuerySchema.parse(req.query);
-    const entries = await getAuditLog(limit, before);
-    res.json(entries);
-  } catch (err) {
-    next(err);
-  }
+superAdminRouter.get("/audit-log", async (c) => {
+  const { limit, before } = auditLogQuerySchema.parse({
+    limit: c.req.query("limit"),
+    before: c.req.query("before"),
+  });
+  const prisma = getRequestPrisma(c);
+  const entries = await getAuditLog(prisma, limit, before);
+  return c.json(entries);
 });

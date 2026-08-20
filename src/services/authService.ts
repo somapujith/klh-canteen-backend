@@ -1,9 +1,9 @@
-import bcrypt from "bcrypt";
-import { prisma } from "../lib/prisma.js";
+import bcrypt from "bcryptjs";
+import type { PrismaClient } from "@prisma/client";
 import { signToken } from "../lib/jwt.js";
 import { ApiError } from "../middleware/errorHandler.js";
 
-export async function login(identifier: string, password: string) {
+export async function login(prisma: PrismaClient, jwtSecret: string, identifier: string, password: string) {
   const user = await prisma.user.findFirst({
     where: { OR: [{ email: identifier }, { rollNumber: identifier }] },
   });
@@ -12,6 +12,6 @@ export async function login(identifier: string, password: string) {
   const valid = await bcrypt.compare(password, user.passwordHash);
   if (!valid) throw new ApiError(401, "INVALID_CREDENTIALS", "Invalid credentials");
 
-  const token = signToken({ sub: user.id, role: user.role, kitchen: user.kitchen });
+  const token = signToken({ sub: user.id, role: user.role, kitchen: user.kitchen }, jwtSecret);
   return { token, role: user.role, name: user.name, kitchen: user.kitchen, id: user.id };
 }

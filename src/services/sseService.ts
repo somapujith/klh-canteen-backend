@@ -1,70 +1,40 @@
-import { Response } from "express";
+import type { Bindings } from "../types.js";
 
-export interface SSEEvent {
-  type: string;
-  data: any;
+type HubEnv = Pick<Bindings, "ORDER_EVENTS_HUB">;
+
+function getHubStub(env: HubEnv): DurableObjectStub | null {
+  if (!env.ORDER_EVENTS_HUB) return null; // no binding (e.g. local Node test run) — caller no-ops
+  const id = env.ORDER_EVENTS_HUB.idFromName("global");
+  return env.ORDER_EVENTS_HUB.get(id);
 }
 
-class SSEService {
-  private clients: Map<string, Response[]> = new Map();
-
-  // Add a new client connection
-  addClient(userId: string, res: Response) {
-    if (!this.clients.has(userId)) {
-      this.clients.set(userId, []);
-    }
-    this.clients.get(userId)!.push(res);
-
-    // Remove client on disconnect
-    res.on("close", () => {
-      this.removeClient(userId, res);
-    });
-  }
-
-  private removeClient(userId: string, res: Response) {
-    const userClients = this.clients.get(userId);
-    if (userClients) {
-      const updatedClients = userClients.filter(client => client !== res);
-      if (updatedClients.length === 0) {
-        this.clients.delete(userId);
-      } else {
-        this.clients.set(userId, updatedClients);
-      }
-    }
-  }
-
-  // Send event to a specific user
-  notifyUser(userId: string, event: SSEEvent) {
-    const userClients = this.clients.get(userId);
-    if (userClients) {
-      const payload = `event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`;
-      userClients.forEach(client => {
-        client.write(payload);
-      });
-    }
-  }
-
-  // Broadcast event to ALL connected users
-  broadcast(event: SSEEvent) {
-    const payload = `event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`;
-    this.clients.forEach(userClients => {
-      userClients.forEach(client => {
-        client.write(payload);
-      });
-    });
-  }
-
-  // Helpers for specific business events
-  broadcastMenuUpdate() {
-    this.broadcast({ type: "MENU_UPDATE", data: { timestamp: Date.now() } });
-  }
-
-  notifyOrderUpdate(studentId: string, orderId: string, status: string) {
-    this.notifyUser(studentId, {
-      type: "ORDER_UPDATE",
-      data: { orderId, status, timestamp: Date.now() }
-    });
-  }
+async function broadcast(env: HubEnv, type: string, data: unknown, userId?: string): Promise<void> {
+  const stub = getHubStub(env);
+  if (!stub) return;
+  await stub.fetch("https://order-events-hub/broadcast", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type, data, userId }),
+  });
 }
 
-export const sseService = new SSEService();
+export const sseService = {
+  /** Forwards a live GET /events/stream connection into the DO's hold-open SSE stream. */
+  async connect(env: HubEnv, userId: string): Promise<Response | null> {
+    const stub = getHubStub(env);
+    if (!stub) return null;
+    return stub.fetch(`https://order-events-hub/connect?userId=${encodeURIComponent(userId)}`);
+  },
+
+  async broadcastMenuUpdate(env: HubEnv): Promise<void> {
+    await broadcast(env, "MENU_UPDATE", { timestamp: Date.now() });
+  },
+
+  async broadcastOrderBoardUpdate(env: HubEnv): Promise<void> {
+    await broadcast(env, "ORDER_BOARD_UPDATE", { timestamp: Date.now() });
+  },
+
+  async notifyOrderUpdate(env: HubEnv, studentId: string, orderId: string, status: string): Promise<void> {
+    await broadcast(env, "ORDER_UPDATE", { orderId, status, timestamp: Date.now() }, studentId);
+  },
+};

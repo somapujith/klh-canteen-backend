@@ -1,6 +1,9 @@
 import "dotenv/config";
-import { prisma } from "../src/lib/prisma.js";
-import bcrypt from "bcrypt";
+import { getPrisma } from "../src/lib/prisma.js";
+import bcrypt from "bcryptjs";
+
+const prisma = getPrisma(process.env.DATABASE_URL!);
+
 async function main() {
   const passwordHash = await bcrypt.hash("student123", 12);
   await prisma.user.upsert({

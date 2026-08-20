@@ -1,6 +1,6 @@
 import QRCode from "qrcode";
-import { prisma } from "../lib/prisma.js";
-import { signOrderToken, verifyOrderToken } from "../lib/orderToken.js";
+import type { PrismaClient } from "@prisma/client";
+import { signOrderToken } from "../lib/orderToken.js";
 import { ApiError } from "../middleware/errorHandler.js";
 
 interface CreateOrderInput {
@@ -18,7 +18,7 @@ function getWeekId(): string {
   return `${d.getUTCFullYear()}-W${weekNo.toString().padStart(2, '0')}`;
 }
 
-export async function createOrder({ studentId, items }: CreateOrderInput) {
+export async function createOrder(prisma: PrismaClient, qrTokenSecret: string, { studentId, items }: CreateOrderInput) {
   if (items.length === 0) throw new ApiError(400, "EMPTY_ORDER", "Order must have at least one item");
 
   return prisma.$transaction(async (tx) => {
@@ -35,22 +35,18 @@ export async function createOrder({ studentId, items }: CreateOrderInput) {
         throw new ApiError(409, "OUT_OF_STOCK", `Insufficient stock for ${lockedItem?.name ?? item.menuItemId}`);
       }
     }
+    // Stock is intentionally NOT decremented here — it's only committed when
+    // the order reaches DELIVERED (see updateOrderStatus), so a placed-but-
+    // never-delivered order doesn't permanently tie up inventory. This check
+    // is just an early, FOR-UPDATE-locked availability guard at order time.
 
-    // 2. Decrement stock
-    for (const item of items) {
-      await tx.menuItem.update({
-        where: { id: item.menuItemId },
-        data: { stockQty: { decrement: item.qty } },
-      });
-    }
-
-    // 3. Re-fetch menu items to get their categories for kitchen splitting
+    // 2. Re-fetch menu items to get their categories for kitchen splitting
     const menuItems = await tx.menuItem.findMany({
       where: { id: { in: menuItemIds } },
       include: { category: true }
     });
 
-    // 4. Split by kitchen and create orders
+    // 3. Split by kitchen and create orders
     const kitchenItems: Record<string, { menuItem: typeof menuItems[0], qty: number }[]> = {};
     items.forEach((i) => {
       const menuItem = menuItems.find((m) => m.id === i.menuItemId)!;
@@ -88,7 +84,7 @@ export async function createOrder({ studentId, items }: CreateOrderInput) {
         include: { items: { include: { menuItem: true } } },
       });
 
-      const token = signOrderToken(order.id);
+      const token = signOrderToken(order.id, qrTokenSecret);
       const updated = await tx.order.update({
         where: { id: order.id },
         data: { token },
@@ -103,13 +99,13 @@ export async function createOrder({ studentId, items }: CreateOrderInput) {
   }, { maxWait: 10_000, timeout: 15_000 });
 }
 
-export async function getStudentOrders(studentId: string) {
+export async function getStudentOrders(prisma: PrismaClient, studentId: string) {
   const orders = await prisma.order.findMany({
     where: { studentId },
     orderBy: { createdAt: "desc" },
     include: { items: { include: { menuItem: true } } },
   });
-  
+
   // Attach qrDataUrl to each order so the history can display it if needed
   return Promise.all(
     orders.map(async (order) => {
@@ -119,54 +115,21 @@ export async function getStudentOrders(studentId: string) {
   );
 }
 
-export async function getOrderForStudent(orderId: string, studentId: string) {
+export async function getOrderForStudent(prisma: PrismaClient, orderId: string, studentId: string) {
   const order = await prisma.order.findFirst({
     where: { id: orderId, studentId },
     include: { items: { include: { menuItem: true } } },
   });
   if (!order) throw new ApiError(404, "NOT_FOUND", "Order not found");
-  
+
   const qrDataUrl = await QRCode.toDataURL(order.token);
   return { ...order, qrDataUrl };
 }
 
-export async function getOrderByToken(token: string, adminKitchen?: string, adminId?: string) {
-  const orderId = verifyOrderToken(token);
-  if (!orderId) throw new ApiError(400, "INVALID_TOKEN", "Invalid or tampered QR token");
-  const order = await prisma.order.findUnique({
-    where: { id: orderId },
-    include: { items: { include: { menuItem: true } }, student: true },
-  });
-  if (!order) throw new ApiError(404, "NOT_FOUND", "Order not found");
-  
-  if (adminKitchen && order.kitchen !== adminKitchen) {
-    throw new ApiError(403, "INVALID_KITCHEN", `This order belongs to the ${order.kitchen} kitchen.`);
-  }
-
-  let isLockedByOther = false;
-  if (adminId && order.status !== "DELIVERED") {
-    const now = new Date();
-    const lockTimeout = 5 * 60 * 1000; // 5 minutes
-
-    if (order.lockedByAdminId && order.lockedByAdminId !== adminId && order.lockedAt) {
-      if (now.getTime() - order.lockedAt.getTime() < lockTimeout) {
-        isLockedByOther = true;
-      }
-    }
-
-    if (!isLockedByOther) {
-      await prisma.order.update({
-        where: { id: order.id },
-        data: { lockedByAdminId: adminId, lockedAt: now }
-      });
-    }
-  }
-  
-  return { ...order, isLockedByOther };
-}
-
-export async function getAllOrders(kitchen?: string) {
-  const where = kitchen ? { kitchen: kitchen as any } : {};
+export async function getAllOrders(prisma: PrismaClient, kitchen?: string, statuses?: string[]) {
+  const where: any = {};
+  if (kitchen) where.kitchen = kitchen;
+  if (statuses) where.status = { in: statuses };
   return prisma.order.findMany({
     where,
     orderBy: { createdAt: "desc" },
@@ -174,12 +137,11 @@ export async function getAllOrders(kitchen?: string) {
   });
 }
 
-export async function getAdminStats(kitchen?: string) {
-  const now = new Date();
+export async function getAdminStats(prisma: PrismaClient, kitchen?: string) {
   // Using local timezone roughly by taking midnight of current UTC day
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
-  
+
   const endOfDay = new Date(startOfDay);
   endOfDay.setHours(23, 59, 59, 999);
 
@@ -202,28 +164,93 @@ export async function getAdminStats(kitchen?: string) {
   };
 }
 
-export async function deliverOrder(orderId: string, adminKitchen?: string | null) {
+const NEXT_STATUS: Record<string, string> = {
+  PENDING: "PREPARING",
+  PREPARING: "COOKED",
+  COOKED: "DELIVERED",
+};
+
+export async function openOrderForAdmin(prisma: PrismaClient, orderId: string, adminId: string, adminKitchen?: string | null) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: { items: { include: { menuItem: true } }, student: true },
+  });
+  if (!order) throw new ApiError(404, "NOT_FOUND", "Order not found");
+  if (adminKitchen && order.kitchen !== adminKitchen) {
+    throw new ApiError(403, "INVALID_KITCHEN", `This order belongs to the ${order.kitchen} kitchen.`);
+  }
+
+  let isLockedByOther = false;
+  const now = new Date();
+  if (order.status !== "DELIVERED" && order.lockedByAdminId && order.lockedByAdminId !== adminId && order.lockedAt) {
+    const lockTimeout = 5 * 60 * 1000;
+    if (now.getTime() - order.lockedAt.getTime() < lockTimeout) {
+      isLockedByOther = true;
+    }
+  }
+
+  const data: Record<string, unknown> = {};
+  if (!order.seenByAdmin) {
+    data.seenByAdmin = true;
+    data.seenAt = now;
+  }
+  if (!isLockedByOther && order.status !== "DELIVERED") {
+    data.lockedByAdminId = adminId;
+    data.lockedAt = now;
+  }
+
+  const updated = Object.keys(data).length > 0
+    ? await prisma.order.update({
+        where: { id: order.id },
+        data,
+        include: { items: { include: { menuItem: true } }, student: true },
+      })
+    : order;
+
+  return { ...updated, isLockedByOther };
+}
+
+export async function updateOrderStatus(prisma: PrismaClient, orderId: string, targetStatus: string, adminKitchen?: string | null) {
   return prisma.$transaction(async (tx) => {
     const orders = await tx.$queryRaw<any[]>`SELECT status, kitchen FROM "Order" WHERE id = ${orderId} FOR UPDATE`;
-    
-    if (orders.length === 0) {
-      throw new ApiError(404, "NOT_FOUND", "Order not found");
-    }
-    
+    if (orders.length === 0) throw new ApiError(404, "NOT_FOUND", "Order not found");
     const existing = orders[0];
 
     if (adminKitchen && existing.kitchen !== adminKitchen) {
-      throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to deliver this kitchen's orders.");
+      throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to update this kitchen's orders.");
     }
-
     if (existing.status === "DELIVERED") {
       throw new ApiError(409, "ALREADY_DELIVERED", "Order was already delivered");
+    }
+    if (NEXT_STATUS[existing.status] !== targetStatus) {
+      throw new ApiError(409, "INVALID_TRANSITION", `Cannot move order from ${existing.status} to ${targetStatus}`);
+    }
+
+    const data: Record<string, unknown> = { status: targetStatus };
+
+    if (targetStatus === "DELIVERED") {
+      const order = await tx.order.findUnique({ where: { id: orderId }, include: { items: true } });
+      const menuItemIds = [...new Set(order!.items.map((i) => i.menuItemId))].sort();
+      const lockedItems = await tx.$queryRaw<{ id: string; name: string; stockQty: number }[]>`
+        SELECT id, name, "stockQty" FROM "MenuItem" WHERE id = ANY(${menuItemIds}) FOR UPDATE
+      `;
+      const lockedById = new Map(lockedItems.map((item) => [item.id, item]));
+      for (const item of order!.items) {
+        const lockedItem = lockedById.get(item.menuItemId);
+        if (!lockedItem || lockedItem.stockQty < item.quantity) {
+          throw new ApiError(409, "OUT_OF_STOCK", `Insufficient stock for ${lockedItem?.name ?? item.menuItemId}`);
+        }
+      }
+      for (const item of order!.items) {
+        await tx.menuItem.update({ where: { id: item.menuItemId }, data: { stockQty: { decrement: item.quantity } } });
+      }
+      data.deliveredAt = new Date();
     }
 
     return tx.order.update({
       where: { id: orderId },
-      data: { status: "DELIVERED", deliveredAt: new Date() },
+      data,
       include: { items: { include: { menuItem: true } } },
     });
-  });
+  }, { maxWait: 10_000, timeout: 15_000 });
 }

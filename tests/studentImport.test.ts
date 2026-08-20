@@ -1,18 +1,21 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import request from "supertest";
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";
 import { createApp } from "../src/app.js";
-import { prisma } from "../src/lib/prisma.js";
+import { getPrisma } from "../src/lib/prisma.js";
 import { signToken } from "../src/lib/jwt.js";
+import { startTestServer } from "./testServer.js";
 
+const prisma = getPrisma(process.env.DATABASE_URL!);
 const app = createApp();
+const server = await startTestServer(app);
 
 async function makeAdminToken() {
   const passwordHash = await bcrypt.hash("x", 12);
   const admin = await prisma.user.create({
     data: { role: "ADMIN", email: `admin-${Date.now()}@klh.edu.in`, passwordHash, name: "A" },
   });
-  return signToken({ sub: admin.id, role: "ADMIN" });
+  return signToken({ sub: admin.id, role: "ADMIN" }, process.env.JWT_SECRET!);
 }
 
 beforeEach(async () => {
@@ -25,6 +28,7 @@ beforeEach(async () => {
 
 afterAll(async () => {
   await prisma.$disconnect();
+  server.close();
 });
 
 describe("POST /admin/students/bulk", () => {
@@ -37,7 +41,7 @@ describe("POST /admin/students/bulk", () => {
       "Asha Rao,23BCE001,asha@klh.edu.in,pass1234",
     ].join("\n");
 
-    const res = await request(app)
+    const res = await request(server)
       .post("/admin/students/bulk")
       .set("Authorization", `Bearer ${token}`)
       .send({ csv });

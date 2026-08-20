@@ -1,6 +1,5 @@
-import bcrypt from "bcrypt";
-import type { Kitchen, Role } from "@prisma/client";
-import { prisma } from "../lib/prisma.js";
+import bcrypt from "bcryptjs";
+import type { Kitchen, PrismaClient, Role } from "@prisma/client";
 import { ApiError } from "../middleware/errorHandler.js";
 
 const userSelect = {
@@ -13,7 +12,7 @@ const userSelect = {
   createdAt: true,
 } as const;
 
-export async function listUsers() {
+export async function listUsers(prisma: PrismaClient) {
   return prisma.user.findMany({
     select: userSelect,
     orderBy: { createdAt: "desc" },
@@ -29,7 +28,7 @@ interface CreateUserInput {
   kitchen?: Kitchen;
 }
 
-export async function createUser(input: CreateUserInput) {
+export async function createUser(prisma: PrismaClient, input: CreateUserInput) {
   const passwordHash = await bcrypt.hash(input.password, 10);
   try {
     return await prisma.user.create({
@@ -58,7 +57,7 @@ interface UpdateUserInput {
   password?: string;
 }
 
-export async function updateUser(id: string, input: UpdateUserInput) {
+export async function updateUser(prisma: PrismaClient, id: string, input: UpdateUserInput) {
   const data: Record<string, unknown> = {};
   if (input.name !== undefined) data.name = input.name;
   if (input.role !== undefined) data.role = input.role;
@@ -79,7 +78,7 @@ export async function updateUser(id: string, input: UpdateUserInput) {
   }
 }
 
-export async function deleteUser(id: string, actorId: string) {
+export async function deleteUser(prisma: PrismaClient, id: string, actorId: string) {
   if (id === actorId) {
     throw new ApiError(400, "CANNOT_DELETE_SELF", "You cannot delete your own account");
   }

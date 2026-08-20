@@ -7,14 +7,12 @@ export interface TokenPayload {
   kitchen?: string | null;
 }
 
-export function signToken(payload: TokenPayload): string {
-  const secret = process.env.JWT_SECRET;
+export function signToken(payload: TokenPayload, secret: string): string {
   if (!secret) throw new Error("JWT_SECRET not set");
   return jwt.sign(payload, secret, { expiresIn: "12h" });
 }
 
-export function verifyToken(token: string): TokenPayload {
-  const secret = process.env.JWT_SECRET;
+export function verifyToken(token: string, secret: string): TokenPayload {
   if (!secret) throw new Error("JWT_SECRET not set");
   return jwt.verify(token, secret) as TokenPayload;
 }

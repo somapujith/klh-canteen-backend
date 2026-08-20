@@ -3,5 +3,7 @@ dist/
 .env
 *.log
 .superpowers/
+.wrangler/
+.DS_Store
 
 /src/generated/prisma

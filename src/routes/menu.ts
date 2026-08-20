@@ -1,15 +1,14 @@
-import { Router } from "express";
+import { Hono } from "hono";
 import { getCategorizedMenu } from "../services/menuService.js";
+import { getRequestPrisma } from "../lib/context.js";
+import type { AppEnv } from "../types.js";
 
-export const menuRouter = Router();
+export const menuRouter = new Hono<AppEnv>();
 
-menuRouter.get("/", async (req, res, next) => {
-  try {
-    const kitchen = req.query.kitchen as string | undefined;
-    const isAdmin = req.query.admin === "true";
-    const menu = await getCategorizedMenu(kitchen, isAdmin);
-    res.json(menu);
-  } catch (err) {
-    next(err);
-  }
+menuRouter.get("/", async (c) => {
+  const kitchen = c.req.query("kitchen");
+  const isAdmin = c.req.query("admin") === "true";
+  const prisma = getRequestPrisma(c);
+  const menu = await getCategorizedMenu(prisma, kitchen, isAdmin);
+  return c.json(menu);
 });

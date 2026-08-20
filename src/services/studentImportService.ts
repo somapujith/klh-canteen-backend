@@ -1,6 +1,6 @@
 import { parse } from "csv-parse/sync";
-import bcrypt from "bcrypt";
-import { prisma } from "../lib/prisma.js";
+import bcrypt from "bcryptjs";
+import type { PrismaClient } from "@prisma/client";
 
 interface CsvRow {
   name: string;
@@ -16,7 +16,7 @@ interface ImportResult {
   reason?: string;
 }
 
-export async function importStudentsFromCsv(csvText: string): Promise<ImportResult[]> {
+export async function importStudentsFromCsv(prisma: PrismaClient, csvText: string): Promise<ImportResult[]> {
   const rows: CsvRow[] = parse(csvText, { columns: true, skip_empty_lines: true, trim: true });
   const results: ImportResult[] = [];
 

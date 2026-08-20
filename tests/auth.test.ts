@@ -1,10 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import request from "supertest";
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";
 import { createApp } from "../src/app.js";
-import { prisma } from "../src/lib/prisma.js";
+import { getPrisma } from "../src/lib/prisma.js";
+import { startTestServer } from "./testServer.js";
 
+const prisma = getPrisma(process.env.DATABASE_URL!);
 const app = createApp();
+const server = await startTestServer(app);
 
 beforeEach(async () => {
   await prisma.orderItem.deleteMany();
@@ -16,6 +19,7 @@ beforeEach(async () => {
 
 afterAll(async () => {
   await prisma.$disconnect();
+  server.close();
 });
 
 describe("POST /auth/login", () => {
@@ -30,7 +34,7 @@ describe("POST /auth/login", () => {
       },
     });
 
-    const res = await request(app)
+    const res = await request(server)
       .post("/auth/login")
       .send({ identifier: "admin@klh.edu.in", password: "secret123" });
 
@@ -51,7 +55,7 @@ describe("POST /auth/login", () => {
       },
     });
 
-    const res = await request(app)
+    const res = await request(server)
       .post("/auth/login")
       .send({ identifier: "student1@klh.edu.in", password: "wrong" });
 

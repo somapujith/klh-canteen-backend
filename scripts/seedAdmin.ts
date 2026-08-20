@@ -1,6 +1,8 @@
 import "dotenv/config";
-import bcrypt from "bcrypt";
-import { prisma } from "../src/lib/prisma.js";
+import bcrypt from "bcryptjs";
+import { getPrisma } from "../src/lib/prisma.js";
+
+const prisma = getPrisma(process.env.DATABASE_URL!);
 
 async function main() {
   const email = process.env.SEED_ADMIN_EMAIL ?? "admin@klh.edu.in";

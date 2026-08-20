@@ -1,0 +1,53 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "klh-canteen-backend",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Plain, non-sensitive vars. CORS_ORIGIN is not secret so it lives here —
+  // override per-environment with `wrangler secret put CORS_ORIGIN` isn't
+  // needed, but you can still edit this value directly for prod vs staging.
+  "vars": {
+    "CORS_ORIGIN": "*"
+  },
+
+  // Sensitive values are NOT set here. Before first deploy, run:
+  //   wrangler secret put DATABASE_URL
+  //   wrangler secret put JWT_SECRET
+  //   wrangler secret put QR_TOKEN_SECRET
+  // These populate env.DATABASE_URL / env.JWT_SECRET / env.QR_TOKEN_SECRET at
+  // runtime without ever being committed to source control.
+
+  // Fixed-window rate limit counters (global 100/min/IP + per-user order
+  // limiter). Fill in `id` after running:
+  //   wrangler kv namespace create RATE_LIMIT_KV
+  "kv_namespaces": [
+    {
+      "binding": "RATE_LIMIT_KV",
+      "id": "REPLACE_WITH_KV_NAMESPACE_ID"
+    }
+  ],
+
+  // Durable Object hub backing real-time SSE broadcast (MENU_UPDATE,
+  // ORDER_BOARD_UPDATE, per-user ORDER_UPDATE). One instance holds all live
+  // /events/stream connections since a DO is a single durable process.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ORDER_EVENTS_HUB",
+        "class_name": "OrderEventsHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["OrderEventsHub"]
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  }
+}

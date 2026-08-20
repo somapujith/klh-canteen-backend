@@ -14,6 +14,8 @@ enum Role {
 
 enum OrderStatus {
   PENDING
+  PREPARING
+  COOKED
   DELIVERED
 }
 
@@ -68,6 +70,8 @@ model Order {
   totalAmount Decimal     @db.Decimal(10, 2)
   createdAt       DateTime    @default(now())
   deliveredAt     DateTime?
+  seenByAdmin     Boolean     @default(false)
+  seenAt          DateTime?
   lockedByAdminId String?
   lockedAt        DateTime?
   items           OrderItem[]
