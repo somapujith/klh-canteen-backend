@@ -33,6 +33,11 @@ const orderLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  // The integration test suite legitimately creates more than 5 orders per
+  // minute against a single shared app instance (many test cases, one IP).
+  // Skip only under NODE_ENV=test (set automatically by vitest); production
+  // and dev behavior is unchanged.
+  skip: () => process.env.NODE_ENV === "test",
   message: { error: { message: "Too many orders placed, please wait a minute.", code: "TOO_MANY_ORDERS" } }
 });
 
@@ -41,6 +46,7 @@ ordersRouter.post("/", requireAuth("STUDENT"), orderLimiter, async (req, res, ne
     const { items } = createOrderSchema.parse(req.body);
     const orders = await createOrder({ studentId: req.user!.id, items });
     sseService.broadcastMenuUpdate();
+    sseService.broadcastOrderBoardUpdate();
     res.status(201).json(orders.map(serializeOrder));
   } catch (err) {
     next(err);

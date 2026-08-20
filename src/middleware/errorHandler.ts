@@ -14,7 +14,7 @@ export class ApiError extends Error {
 
 // Prisma P2028 = "Transaction API error" (e.g. the transaction timed out,
 // commonly while waiting on a row lock under heavy concurrent contention —
-// see deliverOrder's FOR UPDATE locking). This is expected backpressure
+// see updateOrderStatus's FOR UPDATE locking). This is expected backpressure
 // under load, not a server bug, so surface it as a retryable 409 instead of
 // leaking a raw 500 with internal error details to the client.
 function isRetryableTransactionError(err: unknown): boolean {

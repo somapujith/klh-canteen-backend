@@ -59,6 +59,10 @@ class SSEService {
     this.broadcast({ type: "MENU_UPDATE", data: { timestamp: Date.now() } });
   }
 
+  broadcastOrderBoardUpdate() {
+    this.broadcast({ type: "ORDER_BOARD_UPDATE", data: { timestamp: Date.now() } });
+  }
+
   notifyOrderUpdate(studentId: string, orderId: string, status: string) {
     this.notifyUser(studentId, {
       type: "ORDER_UPDATE",

@@ -1,23 +1,21 @@
 import { Router } from "express";
 import { z } from "zod";
 import { requireAuth } from "../middleware/auth.js";
-import { getOrderByToken, deliverOrder, getAllOrders, getAdminStats } from "../services/orderService.js";
+import { openOrderForAdmin, updateOrderStatus, getAllOrders, getAdminStats } from "../services/orderService.js";
 import { sseService } from "../services/sseService.js";
 import { logAction } from "../services/auditService.js";
 
 export const adminOrdersRouter = Router();
 
 const idParamSchema = z.string().uuid();
-const tokenParamSchema = z.string().min(1);
+const statusBodySchema = z.object({ status: z.enum(["PREPARING", "COOKED", "DELIVERED"]) });
+const ACTIVE_STATUSES = ["PENDING", "PREPARING", "COOKED"];
 
 adminOrdersRouter.get("/", requireAuth("ADMIN"), async (req, res, next) => {
   try {
-    const orders = await getAllOrders(req.user!.kitchen || undefined);
-    // Serialize totalAmount for frontend consistency
-    const serialized = orders.map((order) => ({
-      ...order,
-      totalAmount: Number(order.totalAmount).toFixed(2),
-    }));
+    const activeOnly = req.query.active === "true";
+    const orders = await getAllOrders(req.user!.kitchen || undefined, activeOnly ? ACTIVE_STATUSES : undefined);
+    const serialized = orders.map((order) => ({ ...order, totalAmount: Number(order.totalAmount).toFixed(2) }));
     res.json(serialized);
   } catch (err) {
     next(err);
@@ -33,26 +31,31 @@ adminOrdersRouter.get("/stats", requireAuth("ADMIN"), async (req, res, next) => 
   }
 });
 
-adminOrdersRouter.get("/scan/:token", requireAuth("ADMIN"), async (req, res, next) => {
+adminOrdersRouter.get("/:id", requireAuth("ADMIN"), async (req, res, next) => {
   try {
-    const token = tokenParamSchema.parse(req.params.token);
-    const order = await getOrderByToken(token, req.user!.kitchen || undefined, req.user!.id);
-    res.json(order);
+    const id = idParamSchema.parse(req.params.id);
+    const order = await openOrderForAdmin(id, req.user!.id, req.user!.kitchen || undefined);
+    sseService.broadcastOrderBoardUpdate();
+    res.json({ ...order, totalAmount: Number(order.totalAmount).toFixed(2) });
   } catch (err) {
     next(err);
   }
 });
 
-adminOrdersRouter.post("/:id/deliver", requireAuth("ADMIN"), async (req, res, next) => {
+adminOrdersRouter.patch("/:id/status", requireAuth("ADMIN"), async (req, res, next) => {
   try {
     const id = idParamSchema.parse(req.params.id);
-    const order = await deliverOrder(id, req.user!.kitchen || undefined);
+    const { status } = statusBodySchema.parse(req.body);
+    const order = await updateOrderStatus(id, status, req.user!.kitchen || undefined);
     if (!req.user!.kitchen || req.user!.kitchen !== order.kitchen) {
-      await logAction(req.user!.id, "ORDER_DELIVER_OVERRIDE", "Order", order.id, { kitchen: order.kitchen });
+      await logAction(req.user!.id, "ORDER_STATUS_OVERRIDE", "Order", order.id, { kitchen: order.kitchen, status });
     }
-    sseService.notifyOrderUpdate(order.studentId, order.id, order.status);
-    sseService.broadcastMenuUpdate();
-    res.json(order);
+    if (status === "DELIVERED") {
+      sseService.notifyOrderUpdate(order.studentId, order.id, order.status);
+      sseService.broadcastMenuUpdate();
+    }
+    sseService.broadcastOrderBoardUpdate();
+    res.json({ ...order, totalAmount: Number(order.totalAmount).toFixed(2) });
   } catch (err) {
     next(err);
   }
