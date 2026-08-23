@@ -8,11 +8,14 @@ import { menuRouter } from "./routes/menu.js";
 import { adminMenuRouter } from "./routes/adminMenu.js";
 import { adminStudentsRouter } from "./routes/adminStudents.js";
 import { ordersRouter } from "./routes/orders.js";
+import { guestRouter } from "./routes/guest.js";
 import { adminOrdersRouter } from "./routes/adminOrders.js";
 import { eventsRouter } from "./routes/events.js";
 import { superAdminRouter } from "./routes/superadmin.js";
 import { superAdminUsersRouter } from "./routes/superadminUsers.js";
 import { superAdminStudentsRouter } from "./routes/superadminStudents.js";
+import { superAdminCohortsRouter } from "./routes/superadminCohorts.js";
+import { superAdminExportsRouter } from "./routes/superadminExports.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { rateLimit } from "./middleware/rateLimit.js";
 import type { AppEnv } from "./types.js";
@@ -53,11 +56,17 @@ export function createApp() {
   app.route("/admin", adminMenuRouter);
   app.route("/admin/students", adminStudentsRouter);
   app.route("/orders", ordersRouter);
+  // Walk-up guest ordering (no account). Session-scoped reads only —
+  // see the security note at the top of routes/guest.ts.
+  app.route("/guest", guestRouter);
   app.route("/admin/orders", adminOrdersRouter);
   app.route("/events", eventsRouter);
   app.route("/superadmin", superAdminRouter);
   app.route("/superadmin/users", superAdminUsersRouter);
   app.route("/superadmin/students", superAdminStudentsRouter);
+  // Year-end cohort promotion (dry-run by default) and reconciliation exports.
+  app.route("/superadmin/cohorts", superAdminCohortsRouter);
+  app.route("/superadmin/exports", superAdminExportsRouter);
 
   app.onError(async (err, c) => {
     const res = await errorHandler(err, c);

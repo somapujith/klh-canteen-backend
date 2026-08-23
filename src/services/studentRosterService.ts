@@ -25,6 +25,12 @@ export interface RosterSummary {
   created: number;
   skipped: number;
   defaultPassword: string;
+  /**
+   * True when the created accounts must set their own password before they can
+   * order. Surfaced so the admin UI can tell staff what to say to the students
+   * they just imported, rather than leaving them to discover it at checkout.
+   */
+  mustChangePassword: boolean;
   results: RosterResult[];
 }
 
@@ -111,6 +117,21 @@ export async function importStudentRoster(
           rollNumber: s.rollNumber,
           email: emailForRollNumber(s.rollNumber),
           passwordHash,
+          /**
+           * Every student created here shares one password, and their roll
+           * number — the thing they log in with — is printed on a public class
+           * roster. So the account is, on creation, readable by the whole
+           * class. The flag makes that state transitional: they can sign in,
+           * and the only thing they can do with that session is replace the
+           * shared password. requireAuth() refuses everything else, ordering
+           * included.
+           *
+           * Set only on rows this import CREATES. Students already in the
+           * table are reported as "already exists" and are never written to,
+           * so a re-uploaded roster cannot flag a cohort that is already
+           * live — see the backfill note in scripts/seedAdmin.ts.
+           */
+          mustChangePassword: true,
         })),
         skipDuplicates: true,
       });
@@ -123,6 +144,7 @@ export async function importStudentRoster(
     created: results.filter((r) => r.status === "created").length,
     skipped: results.filter((r) => r.status === "skipped").length,
     defaultPassword,
+    mustChangePassword: true,
     results,
   };
 }

@@ -45,6 +45,12 @@ export async function importStudentsFromCsv(prisma: PrismaClient, csvText: strin
         rollNumber: row.rollNumber,
         email: row.email,
         passwordHash,
+        /**
+         * Same rule as the roster import: an account whose password was chosen
+         * by whoever wrote the CSV is not yet the student's own. They must
+         * replace it before requireAuth() will let them do anything but that.
+         */
+        mustChangePassword: true,
       },
     });
     results.push({ row: rowNum, rollNumber: row.rollNumber, status: "created" });

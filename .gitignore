@@ -1,9 +1,13 @@
 node_modules/
 dist/
 .env
+# Local test-suite config; copy .env.test.example. Never commit a real
+# connection string here — the guard cannot protect a leaked credential.
+.env.test
 *.log
 .superpowers/
 .wrangler/
 .DS_Store
 
 /src/generated/prisma
+.github/workflows/

@@ -11,7 +11,12 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "seed:admin": "tsx scripts/seedAdmin.ts",
-    "migrate:deploy": "prisma migrate deploy"
+    "migrate:deploy": "prisma migrate deploy",
+    "test:db:up": "docker compose -f docker-compose.test.yml up -d --wait && npm run test:db:migrate",
+    "test:db:down": "docker compose -f docker-compose.test.yml down -v",
+    "test:db:reset": "npm run test:db:down && npm run test:db:up",
+    "test:db:migrate": "tsx tests/setup/migrateTestDatabase.ts",
+    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit"
   },
   "keywords": [],
   "author": "",
