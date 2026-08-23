@@ -18,6 +18,12 @@ function getWeekId(): string {
   return `${d.getUTCFullYear()}-W${weekNo.toString().padStart(2, '0')}`;
 }
 
+/**
+ * Identity fields an admin needs to recognise who placed an order. Explicit,
+ * because `student: true` returns the whole User row — passwordHash included.
+ */
+const STUDENT_SUMMARY = { select: { id: true, name: true, rollNumber: true, email: true } } as const;
+
 export async function createOrder(prisma: PrismaClient, qrTokenSecret: string, { studentId, items }: CreateOrderInput) {
   if (items.length === 0) throw new ApiError(400, "EMPTY_ORDER", "Order must have at least one item");
 
@@ -133,7 +139,7 @@ export async function getAllOrders(prisma: PrismaClient, kitchen?: string, statu
   return prisma.order.findMany({
     where,
     orderBy: { createdAt: "desc" },
-    include: { items: { include: { menuItem: true } }, student: true },
+    include: { items: { include: { menuItem: true } }, student: STUDENT_SUMMARY },
   });
 }
 
@@ -173,7 +179,7 @@ const NEXT_STATUS: Record<string, string> = {
 export async function openOrderForAdmin(prisma: PrismaClient, orderId: string, adminId: string, adminKitchen?: string | null) {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    include: { items: { include: { menuItem: true } }, student: true },
+    include: { items: { include: { menuItem: true } }, student: STUDENT_SUMMARY },
   });
   if (!order) throw new ApiError(404, "NOT_FOUND", "Order not found");
   if (adminKitchen && order.kitchen !== adminKitchen) {
@@ -203,7 +209,7 @@ export async function openOrderForAdmin(prisma: PrismaClient, orderId: string, a
     ? await prisma.order.update({
         where: { id: order.id },
         data,
-        include: { items: { include: { menuItem: true } }, student: true },
+        include: { items: { include: { menuItem: true } }, student: STUDENT_SUMMARY },
       })
     : order;
 

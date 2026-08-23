@@ -12,6 +12,7 @@ import { adminOrdersRouter } from "./routes/adminOrders.js";
 import { eventsRouter } from "./routes/events.js";
 import { superAdminRouter } from "./routes/superadmin.js";
 import { superAdminUsersRouter } from "./routes/superadminUsers.js";
+import { superAdminStudentsRouter } from "./routes/superadminStudents.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { rateLimit } from "./middleware/rateLimit.js";
 import type { AppEnv } from "./types.js";
@@ -56,8 +57,14 @@ export function createApp() {
   app.route("/events", eventsRouter);
   app.route("/superadmin", superAdminRouter);
   app.route("/superadmin/users", superAdminUsersRouter);
+  app.route("/superadmin/students", superAdminStudentsRouter);
 
-  app.onError(errorHandler);
+  app.onError(async (err, c) => {
+    const res = await errorHandler(err, c);
+    const { CORS_ORIGIN } = env<{ CORS_ORIGIN?: string }>(c);
+    res.headers.set("Access-Control-Allow-Origin", CORS_ORIGIN || "*");
+    return res;
+  });
 
   return app;
 }

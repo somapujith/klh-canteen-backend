@@ -1,4 +1,4 @@
-import type { Role } from "@prisma/client";
+import type { PrismaClient, Role } from "@prisma/client";
 
 /**
  * Cloudflare Workers bindings + secrets, injected per-request via c.env.
@@ -27,6 +27,8 @@ export interface AuthUser {
 
 export interface Variables {
   user?: AuthUser;
+  /** Per-request PrismaClient — see getRequestPrisma() in lib/context.ts. */
+  prisma?: PrismaClient;
 }
 
 export type AppEnv = { Bindings: Bindings; Variables: Variables };

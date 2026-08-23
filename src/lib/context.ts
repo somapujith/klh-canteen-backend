@@ -15,7 +15,17 @@ export function getBindings(c: Context<AppEnv>): Bindings {
   return env<Bindings>(c);
 }
 
-/** Lazily-memoized PrismaClient for the current request's DATABASE_URL. */
+/**
+ * PrismaClient for the current request's DATABASE_URL, memoized on the request
+ * context so repeated calls within one request share a client. The memo has to
+ * live here rather than in module scope because Workers invalidates a previous
+ * request's sockets — see the note in lib/prisma.ts.
+ */
 export function getRequestPrisma(c: Context<AppEnv>) {
-  return getPrisma(getBindings(c).DATABASE_URL);
+  const existing = c.get("prisma");
+  if (existing) return existing;
+
+  const client = getPrisma(getBindings(c).DATABASE_URL);
+  c.set("prisma", client);
+  return client;
 }
