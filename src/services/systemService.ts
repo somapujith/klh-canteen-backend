@@ -1,6 +1,6 @@
-import { prisma } from "../lib/prisma.js";
+import type { PrismaClient } from "@prisma/client";
 
-export async function getStorageStats() {
+export async function getStorageStats(prisma: PrismaClient) {
   const query = await prisma.$queryRaw<{ table_name: string; size: bigint }[]>`
     SELECT relname as table_name, pg_total_relation_size(relid) as size
     FROM pg_catalog.pg_statio_user_tables;
@@ -16,7 +16,7 @@ export async function getStorageStats() {
   query.forEach((row) => {
     const size = Number(row.size);
     const table = row.table_name;
-    
+
     if (table === 'Order' || table === 'OrderItem' || table === 'OrderSequence') {
       stats.ordersAndLogs += size;
     } else if (table === 'User') {
@@ -40,12 +40,12 @@ export async function getStorageStats() {
   };
 }
 
-export async function clearStorage(target: string, retainDays: number = 0) {
+export async function clearStorage(prisma: PrismaClient, target: string, retainDays: number = 0) {
   if (target === 'orders') {
     // Delete delivered orders older than retainDays
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - retainDays);
-    
+
     // Find all delivered orders to delete
     const ordersToDelete = await prisma.order.findMany({
       where: {
@@ -54,9 +54,9 @@ export async function clearStorage(target: string, retainDays: number = 0) {
       },
       select: { id: true }
     });
-    
+
     const orderIds = ordersToDelete.map(o => o.id);
-    
+
     if (orderIds.length > 0) {
       // Delete items
       await prisma.orderItem.deleteMany({
@@ -70,6 +70,6 @@ export async function clearStorage(target: string, retainDays: number = 0) {
     }
     return { success: true, deletedCount: 0 };
   }
-  
+
   throw new Error("Invalid clearing target");
 }

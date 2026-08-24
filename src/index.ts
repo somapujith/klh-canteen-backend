@@ -1,19 +1,14 @@
-import "dotenv/config";
 import { createApp } from "./app.js";
+import { OrderEventsHub } from "./durableObjects/orderEventsHub.js";
+import { RateLimiterHub } from "./durableObjects/rateLimiterHub.js";
 
-const port = Number(process.env.PORT ?? 4000);
 const app = createApp();
 
-app.listen(port, () => {
-  console.log(`KLH Canteen backend listening on port ${port}`);
-});
+export default {
+  fetch: app.fetch,
+};
 
-process.on("uncaughtException", (error) => {
-  console.error("Uncaught Exception:", error);
-  process.exit(1);
-});
-
-process.on("unhandledRejection", (reason, promise) => {
-  console.error("Unhandled Rejection at:", promise, "reason:", reason);
-  process.exit(1);
-});
+// Durable Object classes, bound in wrangler.jsonc as ORDER_EVENTS_HUB and
+// RATE_LIMITER_HUB. A DO class must be exported from the entrypoint or its
+// binding cannot resolve at runtime.
+export { OrderEventsHub, RateLimiterHub };

@@ -1,6 +1,6 @@
 import { parse } from "csv-parse/sync";
-import bcrypt from "bcrypt";
-import { prisma } from "../lib/prisma.js";
+import bcrypt from "bcryptjs";
+import type { PrismaClient } from "@prisma/client";
 
 interface CsvRow {
   name: string;
@@ -16,7 +16,7 @@ interface ImportResult {
   reason?: string;
 }
 
-export async function importStudentsFromCsv(csvText: string): Promise<ImportResult[]> {
+export async function importStudentsFromCsv(prisma: PrismaClient, csvText: string): Promise<ImportResult[]> {
   const rows: CsvRow[] = parse(csvText, { columns: true, skip_empty_lines: true, trim: true });
   const results: ImportResult[] = [];
 
@@ -45,6 +45,12 @@ export async function importStudentsFromCsv(csvText: string): Promise<ImportResu
         rollNumber: row.rollNumber,
         email: row.email,
         passwordHash,
+        /**
+         * Same rule as the roster import: an account whose password was chosen
+         * by whoever wrote the CSV is not yet the student's own. They must
+         * replace it before requireAuth() will let them do anything but that.
+         */
+        mustChangePassword: true,
       },
     });
     results.push({ row: rowNum, rollNumber: row.rollNumber, status: "created" });

@@ -3,28 +3,24 @@ import crypto from "node:crypto";
 const MAGIC_PREFIX = "KLHC1";
 const MAX_TOKEN_AGE_SECONDS = 24 * 60 * 60; // 24h — order QR expires after this
 
-function getSecret(): string {
-  const secret = process.env.QR_TOKEN_SECRET;
-  if (!secret) throw new Error("QR_TOKEN_SECRET not set");
-  return secret;
-}
-
-function sign(orderId: string, issuedAt: number): string {
+function sign(orderId: string, issuedAt: number, secret: string): string {
   return crypto
-    .createHmac("sha256", getSecret())
+    .createHmac("sha256", secret)
     .update(`${MAGIC_PREFIX}.${orderId}.${issuedAt}`)
     .digest("base64url");
 }
 
-export function signOrderToken(orderId: string): string {
+export function signOrderToken(orderId: string, secret: string): string {
+  if (!secret) throw new Error("QR_TOKEN_SECRET not set");
   const issuedAt = Math.floor(Date.now() / 1000);
-  const sig = sign(orderId, issuedAt);
+  const sig = sign(orderId, issuedAt, secret);
   const payload = `${MAGIC_PREFIX}.${orderId}.${issuedAt}.${sig}`;
   return Buffer.from(payload).toString("base64url");
 }
 
-export function verifyOrderToken(token: string): string | null {
+export function verifyOrderToken(token: string, secret: string): string | null {
   try {
+    if (!secret) throw new Error("QR_TOKEN_SECRET not set");
     const decoded = Buffer.from(token, "base64url").toString("utf8");
     const parts = decoded.split(".");
     if (parts.length !== 4) return null;
@@ -36,7 +32,7 @@ export function verifyOrderToken(token: string): string | null {
     const ageSeconds = Math.floor(Date.now() / 1000) - issuedAt;
     if (ageSeconds < 0 || ageSeconds > MAX_TOKEN_AGE_SECONDS) return null;
 
-    const expectedSig = sign(orderId, issuedAt);
+    const expectedSig = sign(orderId, issuedAt, secret);
     const sigBuf = Buffer.from(sig);
     const expectedBuf = Buffer.from(expectedSig);
     if (sigBuf.length !== expectedBuf.length) return null;

@@ -1,24 +1,28 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import request from "supertest";
-import bcrypt from "bcrypt";
-import { createApp } from "../src/app.js";
-import { prisma } from "../src/lib/prisma.js";
+import bcrypt from "bcryptjs";
 
-const app = createApp();
+import { describeDb, getTestPrisma, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
+import { startTestServer, closeTestServer } from "./helpers/app.js";
+
+// The database is reached ONLY through tests/helpers/db.ts, which refuses to
+// hand out a client until tests/setup/vitest.setup.ts has proved the target is
+// a disposable test database. `describeDb` skips (loudly) when none is
+// configured — it never falls back to .env. See TESTING.md.
+const prisma = testDb.enabled ? getTestPrisma() : (undefined as any);
+const server = testDb.enabled ? await startTestServer() : (undefined as any);
 
 beforeEach(async () => {
-  await prisma.orderItem.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.menuItem.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.user.deleteMany();
+  if (testDb.enabled) await resetDatabase();
 });
 
 afterAll(async () => {
-  await prisma.$disconnect();
+  if (!testDb.enabled) return;
+  await disconnectTestPrisma();
+  await closeTestServer(server);
 });
 
-describe("POST /auth/login", () => {
+describeDb("POST /auth/login", () => {
   it("logs in a valid admin and returns a JWT", async () => {
     const passwordHash = await bcrypt.hash("secret123", 12);
     await prisma.user.create({
@@ -30,7 +34,7 @@ describe("POST /auth/login", () => {
       },
     });
 
-    const res = await request(app)
+    const res = await request(server)
       .post("/auth/login")
       .send({ identifier: "admin@klh.edu.in", password: "secret123" });
 
@@ -51,7 +55,7 @@ describe("POST /auth/login", () => {
       },
     });
 
-    const res = await request(app)
+    const res = await request(server)
       .post("/auth/login")
       .send({ identifier: "student1@klh.edu.in", password: "wrong" });
 

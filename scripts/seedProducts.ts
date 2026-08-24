@@ -1,5 +1,7 @@
 import "dotenv/config";
-import { prisma } from "../src/lib/prisma.js";
+import { getPrisma } from "../src/lib/prisma.js";
+
+const prisma = getPrisma(process.env.DATABASE_URL!);
 
 const categories = [
   { name: "Beverages", sortOrder: 1 },

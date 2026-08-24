@@ -1,7 +1,7 @@
-import { prisma } from "../lib/prisma.js";
+import type { PrismaClient } from "@prisma/client";
 import { ApiError } from "../middleware/errorHandler.js";
 
-export async function getCategorizedMenu(kitchen?: string, isAdmin?: boolean) {
+export async function getCategorizedMenu(prisma: PrismaClient, kitchen?: string, isAdmin?: boolean) {
   const where = kitchen ? { kitchen: kitchen as any } : {};
   const categories = await prisma.category.findMany({
     where,
@@ -15,11 +15,16 @@ export async function getCategorizedMenu(kitchen?: string, isAdmin?: boolean) {
   return { categories };
 }
 
-export async function createCategory(name: string, sortOrder: number, kitchen: string = "SNACKS") {
+export async function createCategory(prisma: PrismaClient, name: string, sortOrder: number, kitchen: string = "SNACKS") {
   return prisma.category.create({ data: { name, sortOrder, kitchen: kitchen as any } });
 }
 
-export async function updateCategory(id: string, data: { name?: string; sortOrder?: number }, adminKitchen?: string | null) {
+export async function updateCategory(
+  prisma: PrismaClient,
+  id: string,
+  data: { name?: string; sortOrder?: number },
+  adminKitchen?: string | null
+) {
   const existing = await prisma.category.findUnique({ where: { id } });
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Category not found");
   if (adminKitchen && existing.kitchen !== adminKitchen) {
@@ -28,7 +33,7 @@ export async function updateCategory(id: string, data: { name?: string; sortOrde
   return prisma.category.update({ where: { id }, data });
 }
 
-export async function deleteCategory(id: string, adminKitchen?: string | null) {
+export async function deleteCategory(prisma: PrismaClient, id: string, adminKitchen?: string | null) {
   const existing = await prisma.category.findUnique({ where: { id } });
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Category not found");
   if (adminKitchen && existing.kitchen !== adminKitchen) {
@@ -37,17 +42,21 @@ export async function deleteCategory(id: string, adminKitchen?: string | null) {
   return prisma.category.delete({ where: { id } });
 }
 
-export async function createMenuItem(data: {
-  name: string;
-  imageUrl: string;
-  price: string;
-  stockQty: number;
-  categoryId: string;
-}) {
+export async function createMenuItem(
+  prisma: PrismaClient,
+  data: {
+    name: string;
+    imageUrl: string;
+    price: string;
+    stockQty: number;
+    categoryId: string;
+  }
+) {
   return prisma.menuItem.create({ data });
 }
 
 export async function updateMenuItem(
+  prisma: PrismaClient,
   id: string,
   data: Partial<{ name: string; imageUrl: string; price: string; stockQty: number; isAvailable: boolean; categoryId: string }>,
   adminKitchen?: string | null
@@ -60,7 +69,7 @@ export async function updateMenuItem(
   return prisma.menuItem.update({ where: { id }, data });
 }
 
-export async function deleteMenuItem(id: string, adminKitchen?: string | null) {
+export async function deleteMenuItem(prisma: PrismaClient, id: string, adminKitchen?: string | null) {
   const existing = await prisma.menuItem.findUnique({ where: { id }, include: { category: true } });
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Menu item not found");
   if (adminKitchen && existing.category.kitchen !== adminKitchen) {
@@ -70,6 +79,7 @@ export async function deleteMenuItem(id: string, adminKitchen?: string | null) {
 }
 
 export async function bulkUpdateCategoryItems(
+  prisma: PrismaClient,
   categoryId: string,
   data: Partial<{ isAvailable: boolean; stockQty: number }>,
   adminKitchen?: string | null

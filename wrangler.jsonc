@@ -1,0 +1,74 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "klh-canteen-backend",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Plain, non-sensitive vars. CORS_ORIGIN is not secret so it lives here —
+  // override per-environment with `wrangler secret put CORS_ORIGIN` isn't
+  // needed, but you can still edit this value directly for prod vs staging.
+  "vars": {
+    "CORS_ORIGIN": "*",
+    // Arms the forced-password-change gate: a user with
+    // User.mustChangePassword is refused by requireAuth() everywhere except
+    // the endpoints that let them clear it. Set to "false" ONLY as an
+    // emergency escape hatch — chiefly if the offline load-testing harness
+    // ever finds itself holding tokens for flagged accounts — since it
+    // disarms the gate for every account at once.
+    "ENFORCE_PASSWORD_CHANGE": "true"
+  },
+
+  // Sensitive values are NOT set here. Before first deploy, run:
+  //   wrangler secret put DATABASE_URL
+  //   wrangler secret put JWT_SECRET
+  //   wrangler secret put QR_TOKEN_SECRET
+  // These populate env.DATABASE_URL / env.JWT_SECRET / env.QR_TOKEN_SECRET at
+  // runtime without ever being committed to source control.
+
+  // Retained only for any non-rate-limit use. Rate limit counters moved off
+  // KV to the RATE_LIMITER_HUB Durable Object below: KV's get-then-put is not
+  // atomic, so concurrent callers all read the same value and all passed.
+  // Fill in `id` after running:
+  //   wrangler kv namespace create RATE_LIMIT_KV
+  "kv_namespaces": [
+    {
+      "binding": "RATE_LIMIT_KV",
+      "id": "REPLACE_WITH_KV_NAMESPACE_ID"
+    }
+  ],
+
+  // Durable Object hub backing real-time SSE broadcast (MENU_UPDATE,
+  // ORDER_BOARD_UPDATE, per-user ORDER_UPDATE). One instance holds all live
+  // /events/stream connections since a DO is a single durable process.
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ORDER_EVENTS_HUB",
+        "class_name": "OrderEventsHub"
+      },
+      // Atomic fixed-window rate limit counters (identity-keyed: JWT subject
+      // on authenticated routes, submitted campus ID at login — never IP).
+      // Sharded one instance per (prefix, identity), so no single object
+      // serialises app-wide traffic.
+      {
+        "name": "RATE_LIMITER_HUB",
+        "class_name": "RateLimiterHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["OrderEventsHub"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["RateLimiterHub"]
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  }
+}

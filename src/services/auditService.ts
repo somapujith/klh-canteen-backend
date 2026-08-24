@@ -1,7 +1,7 @@
-import type { Prisma } from "@prisma/client";
-import { prisma } from "../lib/prisma.js";
+import type { Prisma, PrismaClient } from "@prisma/client";
 
 export async function logAction(
+  prisma: PrismaClient,
   actorId: string,
   action: string,
   targetType?: string,
@@ -17,7 +17,7 @@ export async function logAction(
   }
 }
 
-export async function getAuditLog(limit: number, before?: string) {
+export async function getAuditLog(prisma: PrismaClient, limit: number, before?: string) {
   return prisma.auditLog.findMany({
     where: before ? { createdAt: { lt: new Date(before) } } : undefined,
     orderBy: { createdAt: "desc" },

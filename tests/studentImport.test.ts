@@ -1,33 +1,37 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import request from "supertest";
-import bcrypt from "bcrypt";
-import { createApp } from "../src/app.js";
-import { prisma } from "../src/lib/prisma.js";
+import bcrypt from "bcryptjs";
 import { signToken } from "../src/lib/jwt.js";
 
-const app = createApp();
+import { describeDb, getTestPrisma, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
+import { startTestServer, closeTestServer } from "./helpers/app.js";
+
+// The database is reached ONLY through tests/helpers/db.ts, which refuses to
+// hand out a client until tests/setup/vitest.setup.ts has proved the target is
+// a disposable test database. `describeDb` skips (loudly) when none is
+// configured — it never falls back to .env. See TESTING.md.
+const prisma = testDb.enabled ? getTestPrisma() : (undefined as any);
+const server = testDb.enabled ? await startTestServer() : (undefined as any);
 
 async function makeAdminToken() {
   const passwordHash = await bcrypt.hash("x", 12);
   const admin = await prisma.user.create({
     data: { role: "ADMIN", email: `admin-${Date.now()}@klh.edu.in`, passwordHash, name: "A" },
   });
-  return signToken({ sub: admin.id, role: "ADMIN" });
+  return signToken({ sub: admin.id, role: "ADMIN" }, process.env.JWT_SECRET!);
 }
 
 beforeEach(async () => {
-  await prisma.orderItem.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.menuItem.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.user.deleteMany();
+  if (testDb.enabled) await resetDatabase();
 });
 
 afterAll(async () => {
-  await prisma.$disconnect();
+  if (!testDb.enabled) return;
+  await disconnectTestPrisma();
+  await closeTestServer(server);
 });
 
-describe("POST /admin/students/bulk", () => {
+describeDb("POST /admin/students/bulk", () => {
   it("creates students from valid CSV rows and reports duplicates", async () => {
     const token = await makeAdminToken();
     const csv = [
@@ -37,7 +41,7 @@ describe("POST /admin/students/bulk", () => {
       "Asha Rao,23BCE001,asha@klh.edu.in,pass1234",
     ].join("\n");
 
-    const res = await request(app)
+    const res = await request(server)
       .post("/admin/students/bulk")
       .set("Authorization", `Bearer ${token}`)
       .send({ csv });

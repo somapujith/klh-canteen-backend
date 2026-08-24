@@ -1,18 +1,24 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import request from "supertest";
-import bcrypt from "bcrypt";
-import { createApp } from "../src/app.js";
-import { prisma } from "../src/lib/prisma.js";
+import bcrypt from "bcryptjs";
 import { signToken } from "../src/lib/jwt.js";
 
-const app = createApp();
+import { describeDb, getTestPrisma, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
+import { startTestServer, closeTestServer } from "./helpers/app.js";
+
+// The database is reached ONLY through tests/helpers/db.ts, which refuses to
+// hand out a client until tests/setup/vitest.setup.ts has proved the target is
+// a disposable test database. `describeDb` skips (loudly) when none is
+// configured — it never falls back to .env. See TESTING.md.
+const prisma = testDb.enabled ? getTestPrisma() : (undefined as any);
+const server = testDb.enabled ? await startTestServer() : (undefined as any);
 
 async function makeAdminToken() {
   const passwordHash = await bcrypt.hash("x", 12);
   const admin = await prisma.user.create({
     data: { role: "ADMIN", email: `admin-${Date.now()}-${Math.random()}@klh.edu.in`, passwordHash, name: "A" },
   });
-  return { id: admin.id, token: signToken({ sub: admin.id, role: "ADMIN" }) };
+  return { id: admin.id, token: signToken({ sub: admin.id, role: "ADMIN" }, process.env.JWT_SECRET!) };
 }
 
 async function makeStudentToken() {
@@ -20,7 +26,7 @@ async function makeStudentToken() {
   const student = await prisma.user.create({
     data: { role: "STUDENT", rollNumber: `R${Date.now()}-${Math.random()}`, email: `s-${Date.now()}-${Math.random()}@klh.edu.in`, passwordHash, name: "S" },
   });
-  return signToken({ sub: student.id, role: "STUDENT" });
+  return signToken({ sub: student.id, role: "STUDENT" }, process.env.JWT_SECRET!);
 }
 
 async function makeItem(stockQty: number) {
@@ -35,7 +41,7 @@ async function advanceOrderTo(orderId: string, adminToken: string, targetStatus:
   const chain = ["PREPARING", "COOKED", "DELIVERED"];
   const targetIndex = chain.indexOf(targetStatus);
   for (let i = 0; i <= targetIndex; i++) {
-    const res = await request(app)
+    const res = await request(server)
       .patch(`/admin/orders/${orderId}/status`)
       .set("Authorization", `Bearer ${adminToken}`)
       .send({ status: chain[i] });
@@ -44,34 +50,32 @@ async function advanceOrderTo(orderId: string, adminToken: string, targetStatus:
 }
 
 beforeEach(async () => {
-  // AuditLog rows (written by logAction for kitchen-less test admins) must be
-  // cleared before Order/User, or User.deleteMany() 409s on the RESTRICT FK.
-  await prisma.auditLog.deleteMany();
-  await prisma.orderItem.deleteMany();
-  await prisma.order.deleteMany();
-  await prisma.menuItem.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.user.deleteMany();
+  if (testDb.enabled) await resetDatabase();
 });
 
 afterAll(async () => {
-  await prisma.$disconnect();
+  if (!testDb.enabled) return;
+  // resetDatabase() TRUNCATEs everything (AuditLog included), so the next
+  // suite starts clean without this file having to know the FK order.
+  await resetDatabase();
+  await disconnectTestPrisma();
+  await closeTestServer(server);
 });
 
-describe("Admin order board", () => {
+describeDb("Admin order board", () => {
   describe("GET /admin/orders/:id", () => {
     it("opens an order, marks it seen by admin, and returns its items", async () => {
       const admin = await makeAdminToken();
       const studentToken = await makeStudentToken();
       const item = await makeItem(5);
 
-      const orderRes = await request(app)
+      const orderRes = await request(server)
         .post("/orders")
         .set("Authorization", `Bearer ${studentToken}`)
         .send({ items: [{ menuItemId: item.id, qty: 2 }] });
       const { id: orderId } = orderRes.body[0];
 
-      const openRes = await request(app)
+      const openRes = await request(server)
         .get(`/admin/orders/${orderId}`)
         .set("Authorization", `Bearer ${admin.token}`);
       expect(openRes.status).toBe(200);
@@ -90,19 +94,19 @@ describe("Admin order board", () => {
       const studentToken = await makeStudentToken();
       const item = await makeItem(5);
 
-      const orderRes = await request(app)
+      const orderRes = await request(server)
         .post("/orders")
         .set("Authorization", `Bearer ${studentToken}`)
         .send({ items: [{ menuItemId: item.id, qty: 1 }] });
       const { id: orderId } = orderRes.body[0];
 
-      const firstOpen = await request(app)
+      const firstOpen = await request(server)
         .get(`/admin/orders/${orderId}`)
         .set("Authorization", `Bearer ${adminOne.token}`);
       expect(firstOpen.status).toBe(200);
       expect(firstOpen.body.isLockedByOther).toBe(false);
 
-      const secondOpen = await request(app)
+      const secondOpen = await request(server)
         .get(`/admin/orders/${orderId}`)
         .set("Authorization", `Bearer ${adminTwo.token}`);
       expect(secondOpen.status).toBe(200);
@@ -117,13 +121,13 @@ describe("Admin order board", () => {
       const studentToken = await makeStudentToken();
       const item = await makeItem(5);
 
-      const orderRes = await request(app)
+      const orderRes = await request(server)
         .post("/orders")
         .set("Authorization", `Bearer ${studentToken}`)
         .send({ items: [{ menuItemId: item.id, qty: 1 }] });
       const { id: orderId } = orderRes.body[0];
 
-      const res = await request(app)
+      const res = await request(server)
         .get(`/admin/orders/${orderId}`)
         .set("Authorization", `Bearer ${studentToken}`);
       expect(res.status).toBe(403);
@@ -131,7 +135,7 @@ describe("Admin order board", () => {
 
     it("returns 404 for a non-existent order id", async () => {
       const admin = await makeAdminToken();
-      const res = await request(app)
+      const res = await request(server)
         .get("/admin/orders/00000000-0000-0000-0000-000000000000")
         .set("Authorization", `Bearer ${admin.token}`);
       expect(res.status).toBe(404);
@@ -144,27 +148,27 @@ describe("Admin order board", () => {
       const studentToken = await makeStudentToken();
       const item = await makeItem(5);
 
-      const orderRes = await request(app)
+      const orderRes = await request(server)
         .post("/orders")
         .set("Authorization", `Bearer ${studentToken}`)
         .send({ items: [{ menuItemId: item.id, qty: 3 }] });
       const { id: orderId } = orderRes.body[0];
 
-      const preparing = await request(app)
+      const preparing = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
         .set("Authorization", `Bearer ${admin.token}`)
         .send({ status: "PREPARING" });
       expect(preparing.status).toBe(200);
       expect(preparing.body.status).toBe("PREPARING");
 
-      const cooked = await request(app)
+      const cooked = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
         .set("Authorization", `Bearer ${admin.token}`)
         .send({ status: "COOKED" });
       expect(cooked.status).toBe(200);
       expect(cooked.body.status).toBe("COOKED");
 
-      const delivered = await request(app)
+      const delivered = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
         .set("Authorization", `Bearer ${admin.token}`)
         .send({ status: "DELIVERED" });
@@ -180,13 +184,13 @@ describe("Admin order board", () => {
       const studentToken = await makeStudentToken();
       const item = await makeItem(5);
 
-      const orderRes = await request(app)
+      const orderRes = await request(server)
         .post("/orders")
         .set("Authorization", `Bearer ${studentToken}`)
         .send({ items: [{ menuItemId: item.id, qty: 1 }] });
       const { id: orderId } = orderRes.body[0];
 
-      const res = await request(app)
+      const res = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
         .set("Authorization", `Bearer ${admin.token}`)
         .send({ status: "COOKED" });
@@ -199,13 +203,13 @@ describe("Admin order board", () => {
       const studentToken = await makeStudentToken();
       const item = await makeItem(5);
 
-      const orderRes = await request(app)
+      const orderRes = await request(server)
         .post("/orders")
         .set("Authorization", `Bearer ${studentToken}`)
         .send({ items: [{ menuItemId: item.id, qty: 1 }] });
       const { id: orderId } = orderRes.body[0];
 
-      const res = await request(app)
+      const res = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
         .set("Authorization", `Bearer ${admin.token}`)
         .send({ status: "DELIVERED" });
@@ -218,7 +222,7 @@ describe("Admin order board", () => {
       const studentToken = await makeStudentToken();
       const item = await makeItem(1);
 
-      const orderRes = await request(app)
+      const orderRes = await request(server)
         .post("/orders")
         .set("Authorization", `Bearer ${studentToken}`)
         .send({ items: [{ menuItemId: item.id, qty: 1 }] });
@@ -227,7 +231,7 @@ describe("Admin order board", () => {
       await advanceOrderTo(orderId, admin.token, "COOKED");
       await prisma.menuItem.update({ where: { id: item.id }, data: { stockQty: 0 } });
 
-      const res = await request(app)
+      const res = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
         .set("Authorization", `Bearer ${admin.token}`)
         .send({ status: "DELIVERED" });
@@ -241,7 +245,7 @@ describe("Admin order board", () => {
       const plentifulItem = await makeItem(10);
       const scarceItem = await makeItem(2);
 
-      const orderRes = await request(app)
+      const orderRes = await request(server)
         .post("/orders")
         .set("Authorization", `Bearer ${studentToken}`)
         .send({
@@ -259,7 +263,7 @@ describe("Admin order board", () => {
       // the same item in the meantime).
       await prisma.menuItem.update({ where: { id: scarceItem.id }, data: { stockQty: 1 } });
 
-      const res = await request(app)
+      const res = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
         .set("Authorization", `Bearer ${admin.token}`)
         .send({ status: "DELIVERED" });
@@ -279,7 +283,7 @@ describe("Admin order board", () => {
       const studentToken = await makeStudentToken();
       const item = await makeItem(5);
 
-      const orderRes = await request(app)
+      const orderRes = await request(server)
         .post("/orders")
         .set("Authorization", `Bearer ${studentToken}`)
         .send({ items: [{ menuItemId: item.id, qty: 1 }] });
@@ -287,13 +291,13 @@ describe("Admin order board", () => {
 
       await advanceOrderTo(orderId, admin.token, "COOKED");
 
-      const firstDeliver = await request(app)
+      const firstDeliver = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
         .set("Authorization", `Bearer ${admin.token}`)
         .send({ status: "DELIVERED" });
       expect(firstDeliver.status).toBe(200);
 
-      const secondDeliver = await request(app)
+      const secondDeliver = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
         .set("Authorization", `Bearer ${admin.token}`)
         .send({ status: "DELIVERED" });
@@ -307,7 +311,7 @@ describe("Admin order board", () => {
 
     it("returns 404 for a non-existent order id", async () => {
       const admin = await makeAdminToken();
-      const res = await request(app)
+      const res = await request(server)
         .patch("/admin/orders/00000000-0000-0000-0000-000000000000/status")
         .set("Authorization", `Bearer ${admin.token}`)
         .send({ status: "PREPARING" });
@@ -318,13 +322,13 @@ describe("Admin order board", () => {
       const studentToken = await makeStudentToken();
       const item = await makeItem(5);
 
-      const orderRes = await request(app)
+      const orderRes = await request(server)
         .post("/orders")
         .set("Authorization", `Bearer ${studentToken}`)
         .send({ items: [{ menuItemId: item.id, qty: 1 }] });
       const { id: orderId } = orderRes.body[0];
 
-      const res = await request(app)
+      const res = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
         .set("Authorization", `Bearer ${studentToken}`)
         .send({ status: "PREPARING" });
@@ -332,11 +336,13 @@ describe("Admin order board", () => {
     });
 
     it("delivers 20 concurrent status-update requests for an order already at COOKED exactly once, decrementing stock exactly once", async () => {
+      // 20 requests serialize on the same row-level FOR UPDATE lock against a
+      // remote DB; the default 5s vitest timeout is too tight for that.
       const admin = await makeAdminToken();
       const studentToken = await makeStudentToken();
       const item = await makeItem(5);
 
-      const orderRes = await request(app)
+      const orderRes = await request(server)
         .post("/orders")
         .set("Authorization", `Bearer ${studentToken}`)
         .send({ items: [{ menuItemId: item.id, qty: 3 }] });
@@ -345,7 +351,7 @@ describe("Admin order board", () => {
       await advanceOrderTo(orderId, admin.token, "COOKED");
 
       const concurrentRequests = Array.from({ length: 20 }, () =>
-        request(app)
+        request(server)
           .patch(`/admin/orders/${orderId}/status`)
           .set("Authorization", `Bearer ${admin.token}`)
           .send({ status: "DELIVERED" })
@@ -362,51 +368,49 @@ describe("Admin order board", () => {
 
       const updatedItem = await prisma.menuItem.findUnique({ where: { id: item.id } });
       expect(updatedItem?.stockQty).toBe(2);
-    });
+    }, 20000);
 
     it("never oversells: two orders racing for the same scarce stock at DELIVERED admit at most one success and stock never goes negative", async () => {
       const admin = await makeAdminToken();
       const studentToken = await makeStudentToken();
-      // Only 5 units in stock. Two separate orders each want 3 units (6 total demand > 5 supply).
-      // At most one of the two deliveries may succeed; stock must never go negative.
+      // Only 5 units in stock. Two separate orders each want 3 (6 > 5).
       const item = await makeItem(5);
 
-      const orderARes = await request(app)
-        .post("/orders")
-        .set("Authorization", `Bearer ${studentToken}`)
-        .send({ items: [{ menuItemId: item.id, qty: 3 }] });
-      const orderBRes = await request(app)
-        .post("/orders")
-        .set("Authorization", `Bearer ${studentToken}`)
-        .send({ items: [{ menuItemId: item.id, qty: 3 }] });
-      const orderAId = orderARes.body[0].id;
-      const orderBId = orderBRes.body[0].id;
+      const place = (qty: number) =>
+        request(server)
+          .post("/orders")
+          .set("Authorization", `Bearer ${studentToken}`)
+          .send({ items: [{ menuItemId: item.id, qty }] });
 
-      await advanceOrderTo(orderAId, admin.token, "COOKED");
-      await advanceOrderTo(orderBId, admin.token, "COOKED");
+      const orderARes = await place(3);
+      expect(orderARes.status).toBe(201);
 
-      const [resA, resB] = await Promise.all([
-        request(app)
-          .patch(`/admin/orders/${orderAId}/status`)
-          .set("Authorization", `Bearer ${admin.token}`)
-          .send({ status: "DELIVERED" }),
-        request(app)
-          .patch(`/admin/orders/${orderBId}/status`)
-          .set("Authorization", `Bearer ${admin.token}`)
-          .send({ status: "DELIVERED" }),
-      ]);
+      // Stock reservation moved the refusal forward: the three portions order A
+      // holds are already spoken for, so only two are sellable and the second
+      // basket is refused at CREATION rather than at delivery. The invariant is
+      // the same one the old delivery-time check enforced — the canteen never
+      // promises more portions than it has — it is just enforced earlier, and
+      // before the student has been told their order exists.
+      const orderBRes = await place(3);
+      expect(orderBRes.status).toBe(409);
+      expect(orderBRes.body.error.code).toBe("OUT_OF_STOCK");
+      expect(await prisma.order.count()).toBe(1);
 
-      const statuses = [resA.status, resB.status].sort();
-      // Exactly one succeeds (200) and the other is rejected as out of stock (409),
-      // since 5 units of stock cannot satisfy two orders of 3 units each.
-      expect(statuses).toEqual([200, 409]);
+      // Physical stock has not moved yet; it is only committed on delivery.
+      const reserved = await prisma.menuItem.findUnique({ where: { id: item.id } });
+      expect(reserved!.stockQty).toBe(5);
 
-      const failed = resA.status === 409 ? resA : resB;
-      expect(failed.body.error.code).toBe("OUT_OF_STOCK");
+      await advanceOrderTo(orderARes.body[0].id, admin.token, "DELIVERED");
 
-      const updatedItem = await prisma.menuItem.findUnique({ where: { id: item.id } });
-      expect(updatedItem?.stockQty).toBe(2);
-      expect(updatedItem!.stockQty).toBeGreaterThanOrEqual(0);
-    });
+      const settled = await prisma.menuItem.findUnique({ where: { id: item.id } });
+      expect(settled!.stockQty).toBe(2);
+      expect(settled!.stockQty).toBeGreaterThanOrEqual(0);
+      // The reservation was handed back once the stock was actually consumed,
+      // so the remaining two portions are sellable again.
+      expect(settled!.stockQty - settled!.reservedQty).toBe(2);
+
+      // And with the shelf now clear, a basket for the remaining two succeeds.
+      expect((await place(2)).status).toBe(201);
+    }, 10000);
   });
 });

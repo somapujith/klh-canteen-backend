@@ -1,7 +1,17 @@
 node_modules/
 dist/
 .env
+# Local test-suite config; copy .env.test.example. Never commit a real
+# connection string here — the guard cannot protect a leaked credential.
+.env.test
+# Render API key + service id, used only by deploy tooling — never loaded by
+# the app itself, so it stays out of the runtime .env. Same reasoning as
+# .env: never commit a real value here.
+.env.deploy
 *.log
 .superpowers/
+.wrangler/
+.DS_Store
 
 /src/generated/prisma
+.github/workflows/

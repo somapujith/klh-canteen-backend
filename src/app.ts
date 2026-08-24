@@ -1,59 +1,79 @@
-import express, { Express } from "express";
-import cors from "cors";
-import rateLimit from "express-rate-limit";
-import helmet from "helmet";
-import { pinoHttp } from "pino-http";
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { secureHeaders } from "hono/secure-headers";
+import { logger } from "hono/logger";
+import { env } from "hono/adapter";
 import { authRouter } from "./routes/auth.js";
 import { menuRouter } from "./routes/menu.js";
 import { adminMenuRouter } from "./routes/adminMenu.js";
 import { adminStudentsRouter } from "./routes/adminStudents.js";
 import { ordersRouter } from "./routes/orders.js";
+import { guestRouter } from "./routes/guest.js";
 import { adminOrdersRouter } from "./routes/adminOrders.js";
 import { eventsRouter } from "./routes/events.js";
 import { superAdminRouter } from "./routes/superadmin.js";
 import { superAdminUsersRouter } from "./routes/superadminUsers.js";
+import { superAdminStudentsRouter } from "./routes/superadminStudents.js";
+import { superAdminCohortsRouter } from "./routes/superadminCohorts.js";
+import { superAdminExportsRouter } from "./routes/superadminExports.js";
 import { errorHandler } from "./middleware/errorHandler.js";
+import { rateLimit } from "./middleware/rateLimit.js";
+import type { AppEnv } from "./types.js";
 
-export function createApp(): Express {
-  const app = express();
-  // Secure HTTP headers
-  app.use(helmet());
+export function createApp() {
+  const app = new Hono<AppEnv>();
 
-  // Structured production logging
-  app.use(pinoHttp({
-    level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
-    transport: process.env.NODE_ENV !== 'production' ? { target: 'pino-pretty' } : undefined
-  }));
+  // Secure HTTP headers (helmet equivalent)
+  app.use("*", secureHeaders());
+
+  // Minimal request logging (pino/pino-http replacement — those are
+  // Node-only and don't run on Workers). hono/logger is a plain
+  // console.log-based middleware that works on every runtime.
+  app.use("*", logger());
 
   // Restrict CORS to allowed origin in production
-  app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
-  app.use(express.json());
+  app.use("*", async (c, next) => {
+    const { CORS_ORIGIN } = env<{ CORS_ORIGIN?: string }>(c);
+    return cors({ origin: CORS_ORIGIN || "*" })(c, next);
+  });
 
   // Global rate limit: 100 requests per minute per IP
-  const globalLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: 100,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: { error: { message: "Too many requests, please try again later.", code: "TOO_MANY_REQUESTS" } }
+  app.use(
+    "*",
+    rateLimit({
+      prefix: "global",
+      windowSeconds: 60,
+      max: 100,
+      code: "TOO_MANY_REQUESTS",
+      message: "Too many requests, please try again later.",
+    })
+  );
+
+  app.get("/health", (c) => c.json({ status: "ok" }));
+
+  app.route("/auth", authRouter);
+  app.route("/menu", menuRouter);
+  app.route("/admin", adminMenuRouter);
+  app.route("/admin/students", adminStudentsRouter);
+  app.route("/orders", ordersRouter);
+  // Walk-up guest ordering (no account). Session-scoped reads only —
+  // see the security note at the top of routes/guest.ts.
+  app.route("/guest", guestRouter);
+  app.route("/admin/orders", adminOrdersRouter);
+  app.route("/events", eventsRouter);
+  app.route("/superadmin", superAdminRouter);
+  app.route("/superadmin/users", superAdminUsersRouter);
+  app.route("/superadmin/students", superAdminStudentsRouter);
+  // Year-end cohort promotion (dry-run by default) and reconciliation exports.
+  app.route("/superadmin/cohorts", superAdminCohortsRouter);
+  app.route("/superadmin/exports", superAdminExportsRouter);
+
+  app.onError(async (err, c) => {
+    const res = await errorHandler(err, c);
+    const { CORS_ORIGIN } = env<{ CORS_ORIGIN?: string }>(c);
+    res.headers.set("Access-Control-Allow-Origin", CORS_ORIGIN || "*");
+    return res;
   });
-  app.use(globalLimiter);
-
-  app.get("/health", (_req, res) => {
-    res.json({ status: "ok" });
-  });
-
-  app.use("/auth", authRouter);
-  app.use("/menu", menuRouter);
-  app.use("/admin", adminMenuRouter);
-  app.use("/admin/students", adminStudentsRouter);
-  app.use("/orders", ordersRouter);
-  app.use("/admin/orders", adminOrdersRouter);
-  app.use("/events", eventsRouter);
-  app.use("/superadmin", superAdminRouter);
-  app.use("/superadmin/users", superAdminUsersRouter);
-
-  app.use(errorHandler);
 
   return app;
 }

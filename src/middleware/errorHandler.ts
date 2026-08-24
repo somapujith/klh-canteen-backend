@@ -1,6 +1,7 @@
-import type { ErrorRequestHandler } from "express";
+import type { ErrorHandler } from "hono";
 import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
+import type { AppEnv } from "../types.js";
 
 export class ApiError extends Error {
   constructor(
@@ -21,25 +22,27 @@ function isRetryableTransactionError(err: unknown): boolean {
   return err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2028";
 }
 
-export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
+export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
   if (err instanceof ApiError) {
-    res.status(err.status).json({ error: { message: err.message, code: err.code } });
-    return;
+    return c.json({ error: { message: err.message, code: err.code } }, err.status as any);
   }
   if (err instanceof ZodError) {
-    res.status(400).json({ error: { message: "Validation error", code: "VALIDATION_ERROR", details: err.issues } });
-    return;
+    return c.json(
+      { error: { message: "Validation error", code: "VALIDATION_ERROR", details: err.issues } },
+      400
+    );
   }
   if (isRetryableTransactionError(err)) {
-    res.status(409).json({
-      error: { message: "Request could not be completed due to a conflicting operation; please retry", code: "CONFLICT_RETRY" },
-    });
-    return;
+    return c.json(
+      {
+        error: {
+          message: "Request could not be completed due to a conflicting operation; please retry",
+          code: "CONFLICT_RETRY",
+        },
+      },
+      409
+    );
   }
-  if (_req.log && typeof _req.log.error === 'function') {
-    _req.log.error(err);
-  } else {
-    console.error(err);
-  }
-  res.status(500).json({ error: { message: "Internal server error", code: "INTERNAL" } });
+  console.error(err);
+  return c.json({ error: { message: "Internal server error", code: "INTERNAL" } }, 500);
 };
