@@ -40,7 +40,7 @@ describe("orderToken", () => {
     expect(verifyOrderToken("", SECRET)).toBeNull();
   });
 
-  it("rejects a token with a foreign/wrong magic prefix (QR from another app)", () => {
+  it("rejects a token with a foreign/wrong magic prefix (token from another app)", () => {
     const token = signOrderToken("order-123", SECRET);
     const decoded = Buffer.from(token, "base64url").toString("utf8");
     const [, orderId, issuedAt, sig] = decoded.split(".");

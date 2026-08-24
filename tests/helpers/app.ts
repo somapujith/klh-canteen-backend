@@ -92,7 +92,7 @@ export async function createMenuItem(
  *
  * Used by tests whose subject is a READ path — guest isolation, the admin
  * board's pagination and its handling of guest orders. Going through
- * POST /orders would drag stock reservation, kitchen splitting and QR signing
+ * POST /orders would drag stock reservation, kitchen splitting and token signing
  * into tests that are not about any of those, and would make a failure in any
  * of them look like a pagination bug.
  *

@@ -38,7 +38,7 @@ afterAll(async () => {
 });
 
 describeDb("POST /orders", () => {
-  it("creates an order with a QR token, without touching stock yet", async () => {
+  it("creates an order with a signed token, without touching stock yet", async () => {
     const student = await makeStudent();
     const item = await makeItem(10);
     const token = signToken({ sub: student.id, role: "STUDENT" }, process.env.JWT_SECRET!);
@@ -52,7 +52,6 @@ describeDb("POST /orders", () => {
     expect(res.body[0].status).toBe("PENDING");
     expect(res.body[0].totalAmount).toBe("20.00");
     expect(typeof res.body[0].token).toBe("string");
-    expect(res.body[0].qrDataUrl).toMatch(/^data:image\/svg\+xml;utf8,/);
 
     const unchangedItem = await prisma.menuItem.findUnique({ where: { id: item.id } });
     expect(unchangedItem?.stockQty).toBe(10);

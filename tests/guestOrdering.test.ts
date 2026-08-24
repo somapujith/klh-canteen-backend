@@ -60,7 +60,7 @@ describe("guest session tokens (no database needed)", () => {
     expect(verifyGuestSession(swapped, SECRET)).toBeNull();
   });
 
-  it("rejects an order QR token replayed as a session token (prefix separation)", () => {
+  it("rejects an order token replayed as a session token (prefix separation)", () => {
     // Both are HMACs over the same QR_TOKEN_SECRET; only the magic prefix
     // keeps the two namespaces apart.
     const orderToken = signOrderToken(crypto.randomUUID(), SECRET);
@@ -264,7 +264,7 @@ describeDb("POST /guest/orders", () => {
     expect(res.body).toHaveLength(1);
     expect(res.body[0].totalAmount).toBe("40.00");
     expect(res.body[0].status).toBe("PENDING");
-    expect(res.body[0].qrDataUrl).toMatch(/^data:image\/svg\+xml;utf8,/);
+    expect(typeof res.body[0].token).toBe("string");
     // The session key must not come back out in the response.
     expect(res.body[0].guestSessionId).toBeUndefined();
 

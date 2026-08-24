@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import { signOrderToken } from "../lib/orderToken.js";
-import { qrDataUrl } from "../lib/qr.js";
 import { ApiError } from "../middleware/errorHandler.js";
 
 /**
@@ -465,8 +464,8 @@ interface OrderDraft {
  *    row lock held for the rest of the transaction. `nextval()` is
  *    non-transactional and takes no row lock at all, and evaluated inline in
  *    this INSERT it costs no round trip either.
- *  - The QR token. It only needs the order id, and we mint the id here, so
- *    the token is signed before the INSERT instead of by a second UPDATE
+ *  - The order token. It only needs the order id, and we mint the id here,
+ *    so the token is signed before the INSERT instead of by a second UPDATE
  *    afterwards.
  *  - The line items. A data-modifying CTE puts them in the same statement as
  *    their orders; the foreign key is checked at end of statement, by which
@@ -557,7 +556,7 @@ async function insertOrders(
  *
  * Everything that does not need to be here has been moved out: menu prices
  * and the student's name are read before the first statement (in parallel,
- * one round trip), and QR rendering stays after the last one.
+ * one round trip).
  */
 export async function createOrder(
   prisma: PrismaClient,
@@ -739,11 +738,7 @@ export async function createOrder(
     throw err;
   }
 
-  // QR rendering is pure CPU and needs nothing but the token, so it happens
-  // outside the guarded section, once nothing is being held on anybody else's
-  // behalf — and a failure here can no longer look like a failed order and
-  // hand back stock that real rows now own.
-  return Promise.all(orders.map(async (order) => ({ ...order, qrDataUrl: await qrDataUrl(order.token) })));
+  return orders;
 }
 
 // ---------------------------------------------------------------------------
@@ -753,18 +748,11 @@ export async function createOrder(
 export async function getStudentOrders(prisma: PrismaClient, studentId: string) {
   // Self-throttled housekeeping, hung off a read rather than the write path.
   await sweepReservations(prisma);
-  const orders = await prisma.order.findMany({
+  return prisma.order.findMany({
     where: { studentId },
     orderBy: { createdAt: "desc" },
     include: { items: { include: { menuItem: true } } },
   });
-
-  // Attach qrDataUrl to each order so the history can display it if needed
-  return Promise.all(
-    orders.map(async (order) => {
-      return { ...order, qrDataUrl: await qrDataUrl(order.token) };
-    })
-  );
 }
 
 export async function getOrderForStudent(prisma: PrismaClient, orderId: string, studentId: string) {
@@ -774,7 +762,7 @@ export async function getOrderForStudent(prisma: PrismaClient, orderId: string, 
   });
   if (!order) throw new ApiError(404, "NOT_FOUND", "Order not found");
 
-  return { ...order, qrDataUrl: await qrDataUrl(order.token) };
+  return order;
 }
 
 /**
@@ -785,15 +773,11 @@ export async function getOrderForStudent(prisma: PrismaClient, orderId: string, 
  * deliberately no "list everything" path a guest can reach.
  */
 export async function getGuestOrders(prisma: PrismaClient, guestSessionId: string) {
-  const orders = await prisma.order.findMany({
+  return prisma.order.findMany({
     where: { guestSessionId },
     orderBy: { createdAt: "desc" },
     include: { items: { include: { menuItem: true } } },
   });
-
-  return Promise.all(
-    orders.map(async (order) => ({ ...order, qrDataUrl: await qrDataUrl(order.token) })),
-  );
 }
 
 /**
@@ -810,7 +794,7 @@ export async function getOrderForGuest(prisma: PrismaClient, orderId: string, gu
   });
   if (!order) throw new ApiError(404, "NOT_FOUND", "Order not found");
 
-  return { ...order, qrDataUrl: await qrDataUrl(order.token) };
+  return order;
 }
 
 // ---------------------------------------------------------------------------

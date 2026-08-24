@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
 const MAGIC_PREFIX = "KLHC1";
-const MAX_TOKEN_AGE_SECONDS = 24 * 60 * 60; // 24h — order QR expires after this
+const MAX_TOKEN_AGE_SECONDS = 24 * 60 * 60; // 24h — order token expires after this
 
 function sign(orderId: string, issuedAt: number, secret: string): string {
   return crypto

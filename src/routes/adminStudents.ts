@@ -7,9 +7,19 @@ import type { AppEnv } from "../types.js";
 
 export const adminStudentsRouter = new Hono<AppEnv>();
 
+/**
+ * Student management is SUPERADMIN-only.
+ *
+ * Guarding at the router rather than per route so that any endpoint added to
+ * this file later is covered by default — the same fail-closed idiom
+ * routes/superadminStudents.ts uses. A plain ADMIN now gets 403 FORBIDDEN
+ * here; SUPERADMIN passes, as it does for every role gate (middleware/auth.ts).
+ */
+adminStudentsRouter.use("*", requireAuth("SUPERADMIN"));
+
 const bulkSchema = z.object({ csv: z.string().min(1).max(500_000) });
 
-adminStudentsRouter.post("/bulk", requireAuth("ADMIN"), async (c) => {
+adminStudentsRouter.post("/bulk", async (c) => {
   const { csv } = bulkSchema.parse(await c.req.json());
   const prisma = getRequestPrisma(c);
   const results = await importStudentsFromCsv(prisma, csv);

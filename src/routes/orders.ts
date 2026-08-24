@@ -35,7 +35,6 @@ function serializeOrder<T extends { totalAmount: unknown; items: { priceAtOrder:
   return {
     ...order,
     totalAmount: Number(order.totalAmount).toFixed(2),
-    qrDataUrl: (order as any).qrDataUrl,
     orderNumber: (order as any).orderNumber,
     items: order.items.map((item) => ({
       ...item,

@@ -67,7 +67,7 @@ export function verifyGuestSession(token: string, secret: string): string | null
     if (parts.length !== 4) return null;
     const [prefix, sessionId, issuedAtStr, sig] = parts;
 
-    // The prefix keeps guest sessions and order QR tokens in separate
+    // The prefix keeps guest sessions and order tokens in separate
     // namespaces even though they share a secret: an order token can never
     // be replayed as a session, or vice versa.
     if (prefix !== MAGIC_PREFIX) return null;
