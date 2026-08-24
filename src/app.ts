@@ -49,6 +49,18 @@ export function createApp() {
     })
   );
 
+  // Service root. Nothing is mounted at "/", so both Render's HEAD / probe and
+  // anyone opening the base URL in a browser used to get a bare 404, which
+  // reads like a broken deploy in the logs. Answer with a small identity
+  // document instead — no data, no auth, just proof of what is running.
+  app.get("/", (c) =>
+    c.json({
+      service: "klh-canteen-backend",
+      status: "ok",
+      health: "/health",
+    })
+  );
+
   app.get("/health", (c) => c.json({ status: "ok" }));
 
   app.route("/auth", authRouter);
