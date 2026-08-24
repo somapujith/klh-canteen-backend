@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
-import { signOrderToken } from "../lib/orderToken.js";
 import { ApiError } from "../middleware/errorHandler.js";
 
 /**
@@ -456,17 +455,14 @@ interface OrderDraft {
 /**
  * Writes the whole cart — every order and every line item — in ONE statement.
  *
- * Three things were costing round trips to a database on the other side of an
- * ocean, and all three are gone:
+ * Two things were costing round trips to a database on the other side of an
+ * ocean, and both are gone:
  *
  *  - The order number. It used to come from an upsert-with-increment against
  *    a single OrderSequence row, so every order on campus queued behind one
  *    row lock held for the rest of the transaction. `nextval()` is
  *    non-transactional and takes no row lock at all, and evaluated inline in
  *    this INSERT it costs no round trip either.
- *  - The order token. It only needs the order id, and we mint the id here,
- *    so the token is signed before the INSERT instead of by a second UPDATE
- *    afterwards.
  *  - The line items. A data-modifying CTE puts them in the same statement as
  *    their orders; the foreign key is checked at end of statement, by which
  *    point both CTEs have run.
@@ -560,7 +556,6 @@ async function insertOrders(
  */
 export async function createOrder(
   prisma: PrismaClient,
-  qrTokenSecret: string,
   { owner, items, collectionAt }: CreateOrderInput,
 ) {
   if (items.length === 0) throw new ApiError(400, "EMPTY_ORDER", "Order must have at least one item");
@@ -643,7 +638,9 @@ export async function createOrder(
     return {
       id,
       kitchen,
-      token: signOrderToken(id, qrTokenSecret),
+      // Opaque unique row key, nothing more: the UNIQUE constraint on
+      // Order.token is what it exists for. Collection is by order number.
+      token: crypto.randomUUID(),
       totalAmount: total.toFixed(2),
       lines: lines.map((line) => ({ id: crypto.randomUUID(), menuItem: line.menuItem, qty: line.qty })),
     };
@@ -664,7 +661,6 @@ export async function createOrder(
     guestPhone: ownerData.guestPhone,
     status: "PENDING" as const,
     kitchen: draft.kitchen,
-    token: draft.token,
     orderNumber: row.orderNumber,
     totalAmount: draft.totalAmount,
     createdAt: row.createdAt,

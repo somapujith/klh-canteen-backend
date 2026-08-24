@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import { requireAuth } from "../middleware/auth.js";
+import { usernameForRollNumber } from "../services/studentRosterService.js";
 import {
   listUsers,
   countUsers,
@@ -24,14 +25,42 @@ const kitchenEnum = z.enum(["SNACKS", "MEALS"]);
 const roleEnum = z.enum(["STUDENT", "ADMIN", "SUPERADMIN"]);
 const idSchema = z.string().uuid();
 
-const createUserSchema = z.object({
-  role: roleEnum,
-  name: z.string().min(1),
-  email: z.string().email(),
-  password: z.string().min(8),
-  rollNumber: z.string().min(1).optional(),
-  kitchen: kitchenEnum.optional(),
-});
+/**
+ * `email` is optional for a STUDENT that comes with a roll number, and
+ * required (and address-shaped) for everyone else.
+ *
+ * A student's `email` column is a username, not an address — it holds the bare
+ * roll number, exactly as the roster import writes it. Forcing a superadmin
+ * adding one student by hand to invent `<roll>@klh.edu.in` would put that one
+ * account back in the old shape while every imported classmate is in the new
+ * one. Supplying an address still works, so nothing that posts one today
+ * breaks; omitting it derives the username from `rollNumber`.
+ */
+const createUserSchema = z
+  .object({
+    role: roleEnum,
+    name: z.string().min(1),
+    email: z.string().min(1).max(255).optional(),
+    password: z.string().min(8),
+    rollNumber: z.string().min(1).optional(),
+    kitchen: kitchenEnum.optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.role === "STUDENT") {
+      if (!v.email && !v.rollNumber) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["rollNumber"],
+          message: "A student needs a rollNumber (or an explicit email).",
+        });
+      }
+      return;
+    }
+    // Staff accounts are reached by real, deliverable addresses.
+    if (!v.email || !z.string().email().safeParse(v.email).success) {
+      ctx.addIssue({ code: "custom", path: ["email"], message: "A valid email is required." });
+    }
+  });
 
 const updateUserSchema = z.object({
   name: z.string().min(1).optional(),
@@ -138,7 +167,12 @@ superAdminUsersRouter.post("/", async (c) => {
   const data = createUserSchema.parse(await c.req.json());
   const prisma = getRequestPrisma(c);
   const actor = c.get("user")!;
-  const user = await createUser(prisma, data);
+  const user = await createUser(prisma, {
+    ...data,
+    // Guaranteed non-undefined by createUserSchema: a STUDENT without an email
+    // has a rollNumber, and every other role has an email.
+    email: data.email ?? usernameForRollNumber(data.rollNumber!),
+  });
   await logAction(prisma, actor.id, "USER_CREATE", "User", user.id, { role: user.role, email: user.email });
   return c.json(user, 201);
 });

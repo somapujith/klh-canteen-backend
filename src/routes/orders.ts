@@ -36,6 +36,9 @@ function serializeOrder<T extends { totalAmount: unknown; items: { priceAtOrder:
     ...order,
     totalAmount: Number(order.totalAmount).toFixed(2),
     orderNumber: (order as any).orderNumber,
+    // Opaque row key. Nothing outside the database reads it — collection is by
+    // order number — so it stays off the wire.
+    token: undefined,
     items: order.items.map((item) => ({
       ...item,
       priceAtOrder: Number(item.priceAtOrder).toFixed(2),
@@ -54,9 +57,8 @@ const orderLimiter = rateLimit({
 ordersRouter.post("/", requireAuth("STUDENT"), orderLimiter, async (c) => {
   const { items, collectionAt } = createOrderSchema.parse(await c.req.json());
   const prisma = getRequestPrisma(c);
-  const { QR_TOKEN_SECRET } = getBindings(c);
   const user = c.get("user")!;
-  const orders = await createOrder(prisma, QR_TOKEN_SECRET, {
+  const orders = await createOrder(prisma, {
     owner: { studentId: user.id },
     items,
     collectionAt: collectionAt ? new Date(collectionAt) : null,

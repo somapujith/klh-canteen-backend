@@ -102,6 +102,8 @@ function serializeOrder<T extends { totalAmount: unknown; items: { priceAtOrder:
     // The session id is the guest's bearer key. It is never echoed back in a
     // response body, where it would end up in logs and screenshots.
     guestSessionId: undefined,
+    // Opaque row key with no reader outside the database.
+    token: undefined,
   };
 }
 
@@ -142,7 +144,7 @@ guestRouter.post("/orders", requireGuestSession, guestOrderLimiter, async (c) =>
   const bindings = getBindings(c);
   const guestSessionId = c.get("guestSessionId")!;
 
-  const orders = await createOrder(prisma, bindings.QR_TOKEN_SECRET, {
+  const orders = await createOrder(prisma, {
     owner: {
       guestSessionId,
       guestName: body.guestName ?? null,

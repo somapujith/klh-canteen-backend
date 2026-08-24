@@ -6,7 +6,6 @@ import {
   verifyGuestSession,
   GUEST_SESSION_TTL_SECONDS,
 } from "../src/services/guestSessionService.js";
-import { signOrderToken } from "../src/lib/orderToken.js";
 import { describeDb, getTestPrisma, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
 import { startTestServer, closeTestServer, createMenuItem, seedOrder, createStudent } from "./helpers/app.js";
 
@@ -60,11 +59,17 @@ describe("guest session tokens (no database needed)", () => {
     expect(verifyGuestSession(swapped, SECRET)).toBeNull();
   });
 
-  it("rejects an order token replayed as a session token (prefix separation)", () => {
-    // Both are HMACs over the same QR_TOKEN_SECRET; only the magic prefix
-    // keeps the two namespaces apart.
-    const orderToken = signOrderToken(crypto.randomUUID(), SECRET);
-    expect(verifyGuestSession(orderToken, SECRET)).toBeNull();
+  it("rejects a foreign token signed with the same secret (prefix separation)", () => {
+    // Same secret, same construction, different magic prefix. The prefix is
+    // the only thing stopping another namespace's token being replayed here.
+    const sessionId = crypto.randomUUID();
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const sig = crypto
+      .createHmac("sha256", SECRET)
+      .update(`OTHER1.${sessionId}.${issuedAt}`)
+      .digest("base64url");
+    const foreign = Buffer.from(`OTHER1.${sessionId}.${issuedAt}.${sig}`).toString("base64url");
+    expect(verifyGuestSession(foreign, SECRET)).toBeNull();
   });
 
   it("rejects a session older than its TTL", () => {
@@ -264,9 +269,9 @@ describeDb("POST /guest/orders", () => {
     expect(res.body).toHaveLength(1);
     expect(res.body[0].totalAmount).toBe("40.00");
     expect(res.body[0].status).toBe("PENDING");
-    expect(typeof res.body[0].token).toBe("string");
-    // The session key must not come back out in the response.
+    // Neither the session key nor the opaque row key comes back out.
     expect(res.body[0].guestSessionId).toBeUndefined();
+    expect(res.body[0].token).toBeUndefined();
 
     const stored = await prisma.order.findUnique({ where: { id: res.body[0].id } });
     expect(stored!.studentId).toBeNull();

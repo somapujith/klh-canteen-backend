@@ -6,7 +6,14 @@ import { ApiError } from "../middleware/errorHandler.js";
 /** Fallback when DEFAULT_STUDENT_PASSWORD isn't bound. */
 export const DEFAULT_STUDENT_PASSWORD = "klh@123";
 
-const EMAIL_DOMAIN = "klh.edu.in";
+/**
+ * The domain student usernames USED to be suffixed with.
+ *
+ * Nothing is written with it any more — see usernameForRollNumber() — but it
+ * is still read: rows created before the change still carry it, and login()
+ * still accepts it as an identifier so nobody is locked out mid-transition.
+ */
+export const LEGACY_STUDENT_EMAIL_DOMAIN = "klh.edu.in";
 
 interface RosterRow {
   name?: string;
@@ -34,14 +41,43 @@ export interface RosterSummary {
   results: RosterResult[];
 }
 
-/** Students log in by roll number; the address only satisfies User.email's NOT NULL + UNIQUE. */
-export function emailForRollNumber(rollNumber: string): string {
-  return `${rollNumber.toLowerCase()}@${EMAIL_DOMAIN}`;
+/**
+ * The value written to User.email for a roster-created student — the roll
+ * number itself, with no domain attached.
+ *
+ * User.email is NOT NULL + UNIQUE, so every account needs *something* here,
+ * and for a student that something has never been a deliverable address: no
+ * mail is routable to <roll>@klh.edu.in, and the synthetic suffix only ever
+ * appeared in admin lists and audit logs as noise around the one identifier
+ * anybody actually uses. So the column now holds the bare roll number and is,
+ * for students, a username rather than an email.
+ *
+ * Lower-cased on the way in — matching what the old synthesised address did —
+ * so two roster rows differing only in the case of an alphanumeric roll number
+ * still collide on the unique index instead of becoming two accounts. The
+ * `rollNumber` column keeps the roster's original casing.
+ *
+ * Admin and superadmin accounts are untouched by any of this: their emails are
+ * real, are typed by a human, and never pass through here.
+ */
+export function usernameForRollNumber(rollNumber: string): string {
+  return rollNumber.trim().toLowerCase();
 }
 
 /**
- * Creates STUDENT accounts from a `name,rollNumber` CSV, deriving the email
- * from the roll number and giving everyone the same starting password.
+ * What usernameForRollNumber() would have returned before the change.
+ *
+ * Only used to look rows up. A roster re-uploaded before the backfill has run
+ * must still recognise its own students as "already exists", whichever form
+ * their username is currently stored in.
+ */
+export function legacyEmailForRollNumber(rollNumber: string): string {
+  return `${rollNumber.trim().toLowerCase()}@${LEGACY_STUDENT_EMAIL_DOMAIN}`;
+}
+
+/**
+ * Creates STUDENT accounts from a `name,rollNumber` CSV, using the roll number
+ * itself as the username and giving everyone the same starting password.
  *
  * Existing students are reported as skipped rather than updated, so a
  * re-uploaded roster never silently resets a password a student has changed.
@@ -92,14 +128,28 @@ export async function importStudentRoster(
     // CPU/subrequest budget on a 150-student roster.
     const rollNumbers = candidates.map((s) => s.rollNumber);
     const existing = await prisma.user.findMany({
-      where: { OR: [{ rollNumber: { in: rollNumbers } }, { email: { in: rollNumbers.map(emailForRollNumber) } }] },
+      where: {
+        OR: [
+          { rollNumber: { in: rollNumbers } },
+          { email: { in: rollNumbers.map(usernameForRollNumber) } },
+          // Students imported before usernames dropped the domain. Without
+          // this a re-upload would try to create them a second time and be
+          // rejected by the unique index instead of reported as "already
+          // exists". Drop this arm once the backfill has run everywhere.
+          { email: { in: rollNumbers.map(legacyEmailForRollNumber) } },
+        ],
+      },
       select: { rollNumber: true, email: true },
     });
     const takenRolls = new Set(existing.map((u) => u.rollNumber).filter(Boolean) as string[]);
     const takenEmails = new Set(existing.map((u) => u.email));
 
     const fresh = candidates.filter((s) => {
-      if (takenRolls.has(s.rollNumber) || takenEmails.has(emailForRollNumber(s.rollNumber))) {
+      if (
+        takenRolls.has(s.rollNumber) ||
+        takenEmails.has(usernameForRollNumber(s.rollNumber)) ||
+        takenEmails.has(legacyEmailForRollNumber(s.rollNumber))
+      ) {
         results.push({ ...s, status: "skipped", reason: "already exists" });
         return false;
       }
@@ -115,7 +165,7 @@ export async function importStudentRoster(
           role: "STUDENT" as const,
           name: s.name,
           rollNumber: s.rollNumber,
-          email: emailForRollNumber(s.rollNumber),
+          email: usernameForRollNumber(s.rollNumber),
           passwordHash,
           /**
            * Every student created here shares one password, and their roll

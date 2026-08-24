@@ -3,6 +3,7 @@ import type { PrismaClient, Role } from "@prisma/client";
 import { signToken, revocationCutoffSeconds } from "../lib/jwt.js";
 import { ApiError } from "../middleware/errorHandler.js";
 import { assertPasswordStrength, generateTemporaryPassword } from "./passwordPolicy.js";
+import { LEGACY_STUDENT_EMAIL_DOMAIN } from "./studentRosterService.js";
 
 /**
  * Cost factor for every hash this service writes. Matches what the roster
@@ -60,10 +61,53 @@ export async function loadSessionUser(prisma: PrismaClient, userId: string): Pro
   return user as SessionUser | null;
 }
 
+const LEGACY_SUFFIX = `@${LEGACY_STUDENT_EMAIL_DOMAIN}`;
+
+/**
+ * The identifiers a single typed login string may stand for, most literal
+ * first.
+ *
+ * Student usernames used to be stored as `<roll>@klh.edu.in` and are now
+ * stored bare, so during (and after) the backfill a student may type either
+ * form and both have to work: their browser has the old one saved, the class
+ * roster shows the new one. Stripping a trailing `@klh.edu.in` covers that.
+ *
+ * ORDER MATTERS AND THE LIST IS NOT MERGED INTO ONE QUERY. The identifier as
+ * typed is resolved on its own first, and the stripped form is only consulted
+ * when nothing matched it. A single `OR` over both forms could, in principle,
+ * hand back whichever row Postgres reached first when two accounts each match
+ * a different arm — an exact-match-wins ordering makes that impossible, and
+ * means no account that logs in today can start resolving to a different one.
+ */
+export function loginIdentifierCandidates(identifier: string): string[] {
+  const typed = identifier.trim();
+  if (!typed) return [];
+
+  const candidates = [typed];
+  if (typed.toLowerCase().endsWith(LEGACY_SUFFIX)) {
+    const local = typed.slice(0, -LEGACY_SUFFIX.length);
+    if (local) candidates.push(local);
+  }
+  return candidates;
+}
+
 export async function login(prisma: PrismaClient, jwtSecret: string, identifier: string, password: string) {
-  const user = await prisma.user.findFirst({
-    where: { OR: [{ email: identifier }, { rollNumber: identifier }] },
-  });
+  const [typed, legacyStripped] = loginIdentifierCandidates(identifier);
+
+  let user = typed
+    ? await prisma.user.findFirst({ where: { OR: [{ email: typed }, { rollNumber: typed }] } })
+    : null;
+
+  if (!user && legacyStripped) {
+    // Scoped to STUDENT: `<roll>@klh.edu.in` was only ever a *student*
+    // username. A staff address like superadmin@klh.edu.in already matched
+    // above; letting its local part ("superadmin") reach a second lookup that
+    // could match any role would be handing an attacker a free alias.
+    user = await prisma.user.findFirst({
+      where: { role: "STUDENT", OR: [{ email: legacyStripped }, { rollNumber: legacyStripped }] },
+    });
+  }
+
   if (!user) throw new ApiError(401, "INVALID_CREDENTIALS", "Invalid credentials");
 
   const valid = await bcrypt.compare(password, user.passwordHash);
@@ -212,9 +256,10 @@ export interface AdminResetInput {
  * Admin-mediated password reset — the self-service path for a student who has
  * forgotten their password.
  *
- * There is deliberately no email link. Student addresses are synthesised as
- * <rollNumber>@klh.edu.in and no mail is deliverable to them, so an emailed
- * token would be a reset flow that silently never completes. The counter is
+ * There is deliberately no email link. A student's `email` column holds their
+ * roll number, not an address — it is a username — and no mail is deliverable
+ * to them at all, so an emailed token would be a reset flow that silently
+ * never completes. The counter is
  * the out-of-band channel instead: the student turns up with their ID card,
  * the admin issues a one-time temporary password, and mustChangePassword
  * forces them onto a secret the admin does not know before they can order.

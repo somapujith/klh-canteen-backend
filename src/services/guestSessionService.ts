@@ -5,8 +5,7 @@ import crypto from "node:crypto";
  *
  * A walk-up guest has no account, so there is nothing to authenticate them
  * against. What they get instead is a signed bearer of a random session id:
- * an HMAC over `<prefix>.<sessionId>.<issuedAt>`, built exactly like
- * lib/orderToken.ts and signed with the same QR_TOKEN_SECRET.
+ * an HMAC over `<prefix>.<sessionId>.<issuedAt>`, signed with QR_TOKEN_SECRET.
  *
  * Why an HMAC rather than a random string in a table:
  *   - it is unforgeable without the secret, so `sessionId` can be trusted as
@@ -67,9 +66,8 @@ export function verifyGuestSession(token: string, secret: string): string | null
     if (parts.length !== 4) return null;
     const [prefix, sessionId, issuedAtStr, sig] = parts;
 
-    // The prefix keeps guest sessions and order tokens in separate
-    // namespaces even though they share a secret: an order token can never
-    // be replayed as a session, or vice versa.
+    // The magic prefix namespaces this token. Anything minted elsewhere over
+    // the same secret can never be replayed as a session.
     if (prefix !== MAGIC_PREFIX) return null;
 
     const issuedAt = Number(issuedAtStr);

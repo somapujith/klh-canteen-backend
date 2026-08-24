@@ -187,13 +187,13 @@ cross-test pollution nobody can reproduce.
 | --- | --- | --- |
 | The guard itself | `tests/databaseGuard.test.ts` | Refuses the real `.env` URL, non-test names, un-opted-in remotes; redacts passwords. |
 | Migrations reproduce the schema | `tests/schemaDrift.test.ts` | **Currently failing on purpose** — see *Known issues*. |
-| Guest sessions (crypto) | `tests/guestOrdering.test.ts` | Round-trip, tampered signature, wrong secret, swapped session id, order-QR replayed as a session, expired, future-dated, garbage. |
+| Guest sessions (crypto) | `tests/guestOrdering.test.ts` | Round-trip, tampered signature, wrong secret, swapped session id, foreign-prefix token replayed as a session, expired, future-dated, garbage. |
 | Guest ordering + **isolation** | `tests/guestOrdering.test.ts` | Session A gets a **404** — byte-identical to a non-existent id — for session B's order; no header → 401; forged/expired/wrong-secret token → 401; a guest cannot reach a student's order; the session id is never echoed back. |
 | Pre-booking | `tests/preBooking.test.ts` | Slot flooring; `COLLECTION_WINDOW_PAST`; `COLLECTION_WINDOW_TOO_FAR`; omitting `collectionAt` means ASAP (`NULL`) and takes no seat; a full window returns 409 `COLLECTION_WINDOW_FULL`; **12 concurrent bookings for 3 seats admit exactly 3**; a two-kitchen cart books both kitchens or neither. |
 | Admin pagination | `tests/adminOrdersPagination.test.ts` | Bare-array default (+ `X-Next-Cursor` / `X-Has-More` / `Access-Control-Expose-Headers`); `?format=envelope`; cursor walking with no duplicates or gaps; the keyset property (an order arriving mid-scroll does not push a row off the next page); active-only default; `?active=false`; status filter; page-size ceiling; malformed cursor → 400; kitchen scoping. |
 | Guest orders in admin views | `tests/adminOrdersPagination.test.ts` | `studentId = NULL` rows list, open and advance without crashing; `customer.type === "GUEST"`; anonymous guests get a label; the session id is never leaked to an admin. |
 | Identity rate limiting | `tests/rateLimitIdentity.test.ts` | **No lockout**: the correct password still works after 10 wrong ones; login never returns 429; one student's failures never touch another's counter; counters are keyed on the normalised identity and nothing network-derived; a successful login clears the counter. Also: the `reject` strategy *does* 429 the 6th guest order, and anonymous traffic is not limited by network address. |
-| Pre-existing suites | `auth`, `menu`, `orders`, `adminOrders`, `studentImport`, `orderToken` | Ported onto the guarded helpers; no test touches the database except through `tests/helpers/db.ts`. |
+| Pre-existing suites | `auth`, `menu`, `orders`, `adminOrders`, `studentImport` | Ported onto the guarded helpers; no test touches the database except through `tests/helpers/db.ts`. |
 
 ## What is **not** covered, and why
 
@@ -246,9 +246,6 @@ its own once that lands.
 
 ### 2. Stale assumptions in two pre-existing tests (fixed here)
 
-* `orders.test.ts` and `adminOrders.test.ts` asserted a PNG QR data URL;
-  `src/lib/qr.ts` returns SVG (rasterising needs a canvas, which workerd has
-  none of). Updated.
 * `adminOrders.test.ts`'s oversell test assumed two baskets for scarce stock
   could both be *created* and would collide at delivery. Stock reservation moved
   that refusal forward to order creation. The test now asserts the same

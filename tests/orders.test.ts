@@ -51,7 +51,8 @@ describeDb("POST /orders", () => {
     expect(res.status).toBe(201);
     expect(res.body[0].status).toBe("PENDING");
     expect(res.body[0].totalAmount).toBe("20.00");
-    expect(typeof res.body[0].token).toBe("string");
+    // The opaque row key is not part of the client contract.
+    expect(res.body[0].token).toBeUndefined();
 
     const unchangedItem = await prisma.menuItem.findUnique({ where: { id: item.id } });
     expect(unchangedItem?.stockQty).toBe(10);
