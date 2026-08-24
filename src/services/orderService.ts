@@ -1113,11 +1113,15 @@ export async function updateOrderStatus(prisma: PrismaClient, orderId: string, t
       data.deliveredAt = new Date();
     }
 
-    return tx.order.update({
+    // Same shape as the admin read paths, `customer` included: the board swaps
+    // this payload straight into the order it is displaying, and a response
+    // missing `customer` blanks the screen mid-service.
+    const updated = await tx.order.update({
       where: { id: orderId },
       data,
-      include: { items: { include: { menuItem: true } } },
+      include: ADMIN_ORDER_INCLUDE,
     });
+    return withCustomer(updated);
   }, { maxWait: 10_000, timeout: 15_000 });
 }
 
