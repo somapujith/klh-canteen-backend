@@ -37,8 +37,8 @@ async function makeItem(stockQty: number) {
 }
 
 // Drives an order sequentially through PENDING -> ... -> targetStatus via PATCH calls.
-async function advanceOrderTo(orderId: string, adminToken: string, targetStatus: "PREPARING" | "COOKED" | "DELIVERED") {
-  const chain = ["PREPARING", "COOKED", "DELIVERED"];
+async function advanceOrderTo(orderId: string, adminToken: string, targetStatus: "COOKED" | "DELIVERED") {
+  const chain = ["COOKED", "DELIVERED"];
   const targetIndex = chain.indexOf(targetStatus);
   for (let i = 0; i <= targetIndex; i++) {
     const res = await request(server)
@@ -133,6 +133,54 @@ describeDb("Admin order board", () => {
       expect(res.status).toBe(403);
     });
 
+    it("rejects PENDING -> PREPARING now that the board is a two-step flow", async () => {
+      const admin = await makeAdminToken();
+      const studentToken = await makeStudentToken();
+      const item = await makeItem(5);
+
+      const orderRes = await request(server)
+        .post("/orders")
+        .set("Authorization", `Bearer ${studentToken}`)
+        .send({ items: [{ menuItemId: item.id, qty: 1 }] });
+      const { id: orderId } = orderRes.body[0];
+
+      const res = await request(server)
+        .patch(`/admin/orders/${orderId}/status`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ status: "PREPARING" });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe("INVALID_TRANSITION");
+    });
+
+    it("still advances a legacy order already sitting in PREPARING to COOKED", async () => {
+      const admin = await makeAdminToken();
+      const item = await makeItem(5);
+      const passwordHash = await bcrypt.hash("x", 12);
+      const student = await prisma.user.create({
+        data: { role: "STUDENT", rollNumber: `R${Date.now()}-${Math.random()}`, email: `s-${Date.now()}-${Math.random()}@klh.edu.in`, passwordHash, name: "S" },
+      });
+      const legacy = await prisma.order.create({
+        data: {
+          studentId: student.id,
+          status: "PREPARING",
+          kitchen: "SNACKS",
+          token: `legacy-${Date.now()}-${Math.random()}`,
+          orderNumber: 4321,
+          totalAmount: "10.00",
+          items: { create: [{ menuItemId: item.id, quantity: 1, priceAtOrder: "10.00" }] },
+        },
+      });
+
+      const res = await request(server)
+        .patch(`/admin/orders/${legacy.id}/status`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ status: "COOKED" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("COOKED");
+    });
+
     it("returns 404 for a non-existent order id", async () => {
       const admin = await makeAdminToken();
       const res = await request(server)
@@ -143,7 +191,7 @@ describeDb("Admin order board", () => {
   });
 
   describe("PATCH /admin/orders/:id/status", () => {
-    it("walks an order through PENDING -> PREPARING -> COOKED -> DELIVERED, 200 at every step", async () => {
+    it("walks an order through PENDING -> COOKED -> DELIVERED, 200 at every step", async () => {
       const admin = await makeAdminToken();
       const studentToken = await makeStudentToken();
       const item = await makeItem(5);
@@ -153,13 +201,6 @@ describeDb("Admin order board", () => {
         .set("Authorization", `Bearer ${studentToken}`)
         .send({ items: [{ menuItemId: item.id, qty: 3 }] });
       const { id: orderId } = orderRes.body[0];
-
-      const preparing = await request(server)
-        .patch(`/admin/orders/${orderId}/status`)
-        .set("Authorization", `Bearer ${admin.token}`)
-        .send({ status: "PREPARING" });
-      expect(preparing.status).toBe(200);
-      expect(preparing.body.status).toBe("PREPARING");
 
       const cooked = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
@@ -177,25 +218,6 @@ describeDb("Admin order board", () => {
 
       const updatedItem = await prisma.menuItem.findUnique({ where: { id: item.id } });
       expect(updatedItem?.stockQty).toBe(2);
-    });
-
-    it("rejects skipping a step (PENDING straight to COOKED)", async () => {
-      const admin = await makeAdminToken();
-      const studentToken = await makeStudentToken();
-      const item = await makeItem(5);
-
-      const orderRes = await request(server)
-        .post("/orders")
-        .set("Authorization", `Bearer ${studentToken}`)
-        .send({ items: [{ menuItemId: item.id, qty: 1 }] });
-      const { id: orderId } = orderRes.body[0];
-
-      const res = await request(server)
-        .patch(`/admin/orders/${orderId}/status`)
-        .set("Authorization", `Bearer ${admin.token}`)
-        .send({ status: "COOKED" });
-      expect(res.status).toBe(409);
-      expect(res.body.error.code).toBe("INVALID_TRANSITION");
     });
 
     it("rejects skipping a step (PENDING straight to DELIVERED)", async () => {
@@ -314,7 +336,7 @@ describeDb("Admin order board", () => {
       const res = await request(server)
         .patch("/admin/orders/00000000-0000-0000-0000-000000000000/status")
         .set("Authorization", `Bearer ${admin.token}`)
-        .send({ status: "PREPARING" });
+        .send({ status: "COOKED" });
       expect(res.status).toBe(404);
     });
 
@@ -331,7 +353,7 @@ describeDb("Admin order board", () => {
       const res = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
         .set("Authorization", `Bearer ${studentToken}`)
-        .send({ status: "PREPARING" });
+        .send({ status: "COOKED" });
       expect(res.status).toBe(403);
     });
 

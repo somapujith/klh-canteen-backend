@@ -998,8 +998,14 @@ export async function getAdminStats(prisma: PrismaClient, kitchen?: string) {
   };
 }
 
+/**
+ * The board is a two-step flow: PENDING -> COOKED ("Order Prepared") ->
+ * DELIVERED ("Collected"). PREPARING is retired — nothing transitions *into*
+ * it any more — but rows already sitting in it from before this change must
+ * still be movable, so the PREPARING -> COOKED edge stays.
+ */
 const NEXT_STATUS: Record<string, string> = {
-  PENDING: "PREPARING",
+  PENDING: "COOKED",
   PREPARING: "COOKED",
   COOKED: "DELIVERED",
 };

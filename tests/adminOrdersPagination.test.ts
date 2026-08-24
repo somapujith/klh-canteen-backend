@@ -340,10 +340,10 @@ describeDb("admin views tolerate guest orders (NULL studentId)", () => {
     const res = await request(server)
       .patch(`/admin/orders/${order.id}/status`)
       .set("Authorization", auth)
-      .send({ status: "PREPARING" });
+      .send({ status: "COOKED" });
 
     expect(res.status).toBe(200);
-    expect(res.body.status).toBe("PREPARING");
+    expect(res.body.status).toBe("COOKED");
   });
 
   it("mixes guest and student orders on one page", async () => {
