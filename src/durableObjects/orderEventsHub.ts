@@ -69,8 +69,10 @@ import {
   FRAME_KEY_PREFIX,
   REALTIME_PROTOCOL_VERSION,
   SSE_HEARTBEAT_MS,
-  audienceKey,
+  buildFramePayload,
   frameKey,
+  groupEmitItems,
+  matchesAudience,
 } from "../lib/realtime.js";
 import type {
   Audience,
@@ -272,7 +274,7 @@ export class OrderEventsHub {
       } else {
         resumed = true;
         for (const frame of retained) {
-          if (frame.seq > cursor && this.matches(sub, frame.audience)) frames.push(frame);
+          if (frame.seq > cursor && matchesAudience(sub, frame.audience)) frames.push(frame);
         }
       }
     }
@@ -395,29 +397,21 @@ export class OrderEventsHub {
       return;
     }
 
-    // Group by (event type, audience) preserving first-seen order, so N
-    // changes to the same audience become ONE frame carrying N deltas.
-    const groups = new Map<string, { type: RealtimeEventType; audience: Audience; items: EmitRequestItem[] }>();
-    for (const item of pending) {
-      const key = `${item.type}|${audienceKey(item.audience)}`;
-      const group = groups.get(key);
-      if (group) group.items.push(item);
-      else groups.set(key, { type: item.type, audience: item.audience, items: [item] });
-    }
+    const groups = groupEmitItems(pending);
 
     let seq = (await this.state.storage.get<number>(KEY_SEQ)) ?? 0;
     const now = Date.now();
     const frames: StoredFrame[] = [];
     const writes: Record<string, StoredFrame> = {};
 
-    for (const group of groups.values()) {
+    for (const group of groups) {
       seq += 1;
       const frame: StoredFrame = {
         seq,
         ts: now,
         type: group.type,
         audience: group.audience,
-        data: JSON.stringify(this.buildPayload(group.type, group.audience, group.items, now)),
+        data: JSON.stringify(buildFramePayload(group.type, group.audience, group.items, now)),
       };
       frames.push(frame);
       writes[frameKey(seq)] = frame;
@@ -429,60 +423,9 @@ export class OrderEventsHub {
     for (const frame of frames) this.deliver(frame);
   }
 
-  private buildPayload(
-    type: RealtimeEventType,
-    audience: Audience,
-    items: EmitRequestItem[],
-    now: number,
-  ): Record<string, unknown> {
-    // Deltas are deduplicated per target: two stock changes to the same item
-    // inside one window collapse to the later, absolute value.
-    const byTarget = new Map<string, EmitRequestItem>();
-    for (const item of items) {
-      const delta = item.delta as { kind: string; menuItemId?: string; orderId?: string };
-      const target = `${delta.kind}:${delta.menuItemId ?? delta.orderId ?? ""}`;
-      byTarget.set(target, item);
-    }
-    const merged = [...byTarget.values()];
-
-    const legacy: Record<string, unknown> = {};
-    for (const item of merged) if (item.legacy) Object.assign(legacy, item.legacy);
-
-    const payload: Record<string, unknown> = {
-      v: REALTIME_PROTOCOL_VERSION,
-      timestamp: now,
-      count: merged.length,
-      ...legacy,
-      deltas: merged.map((item) => item.delta),
-    };
-
-    if (type === EVENT_ORDER_BOARD_UPDATE && audience.scope === "KITCHEN") {
-      payload.kitchen = audience.kitchen;
-    }
-    // v1 clients read data.orderId / data.status off ORDER_UPDATE directly;
-    // make sure they are always present even if the caller omitted `legacy`.
-    if (type === EVENT_ORDER_UPDATE && payload.orderId === undefined) {
-      const first = merged[0]?.delta as { orderId?: string; status?: string } | undefined;
-      if (first?.orderId) payload.orderId = first.orderId;
-      if (first?.status) payload.status = first.status;
-    }
-    return payload;
-  }
-
   // -------------------------------------------------------------------------
   // Fan-out
   // -------------------------------------------------------------------------
-
-  private matches(sub: Subscription, audience: Audience): boolean {
-    switch (audience.scope) {
-      case "ALL":
-        return true;
-      case "KITCHEN":
-        return sub.kitchens.includes(audience.kitchen);
-      case "SUBJECT":
-        return sub.subjectId === audience.subjectId;
-    }
-  }
 
   /** Fan out one frame. Synchronous by design: nothing here may block the
    *  coalescing alarm on a client's network. */
@@ -514,7 +457,7 @@ export class OrderEventsHub {
     }
 
     for (const [id, conn] of [...this.sseClients]) {
-      if (this.matches(conn.sub, frame.audience)) this.writeSse(id, frame);
+      if (matchesAudience(conn.sub, frame.audience)) this.writeSse(id, frame);
     }
   }
 

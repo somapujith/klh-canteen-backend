@@ -349,3 +349,90 @@ export function frameKey(seq: number): string {
 }
 
 export const FRAME_KEY_PREFIX = "e:";
+
+// ---------------------------------------------------------------------------
+// Frame construction, shared by every hub implementation.
+//
+// There are two hubs: the Durable Object (src/durableObjects/orderEventsHub.ts,
+// Workers) and the in-process one (src/services/nodeEventsHub.ts, Node/Render).
+// They differ only in transport and storage — grouping, dedup and payload shape
+// are protocol, not implementation, so they live here. A client cannot tell
+// which hub it is talking to, and that is only true if this logic exists once.
+// ---------------------------------------------------------------------------
+
+/** Does this subscription receive frames addressed to this audience? */
+export function matchesAudience(sub: Subscription, audience: Audience): boolean {
+  switch (audience.scope) {
+    case "ALL":
+      return true;
+    case "KITCHEN":
+      return sub.kitchens.includes(audience.kitchen);
+    case "SUBJECT":
+      return sub.subjectId === audience.subjectId;
+  }
+}
+
+export interface EmitGroup {
+  type: RealtimeEventType;
+  audience: Audience;
+  items: EmitRequestItem[];
+}
+
+/**
+ * Group queued changes by (event type, audience), preserving first-seen order,
+ * so N changes for one audience become ONE frame carrying N deltas.
+ */
+export function groupEmitItems(items: EmitRequestItem[]): EmitGroup[] {
+  const groups = new Map<string, EmitGroup>();
+  for (const item of items) {
+    const key = `${item.type}|${audienceKey(item.audience)}`;
+    const group = groups.get(key);
+    if (group) group.items.push(item);
+    else groups.set(key, { type: item.type, audience: item.audience, items: [item] });
+  }
+  return [...groups.values()];
+}
+
+/**
+ * The wire payload for one coalesced frame.
+ *
+ * Deltas are deduplicated per target: two stock changes to the same item inside
+ * one window collapse to the later, absolute value.
+ */
+export function buildFramePayload(
+  type: RealtimeEventType,
+  audience: Audience,
+  items: EmitRequestItem[],
+  now: number,
+): Record<string, unknown> {
+  const byTarget = new Map<string, EmitRequestItem>();
+  for (const item of items) {
+    const delta = item.delta as { kind: string; menuItemId?: string; orderId?: string };
+    const target = `${delta.kind}:${delta.menuItemId ?? delta.orderId ?? ""}`;
+    byTarget.set(target, item);
+  }
+  const merged = [...byTarget.values()];
+
+  const legacy: Record<string, unknown> = {};
+  for (const item of merged) if (item.legacy) Object.assign(legacy, item.legacy);
+
+  const payload: Record<string, unknown> = {
+    v: REALTIME_PROTOCOL_VERSION,
+    timestamp: now,
+    count: merged.length,
+    ...legacy,
+    deltas: merged.map((item) => item.delta),
+  };
+
+  if (type === EVENT_ORDER_BOARD_UPDATE && audience.scope === "KITCHEN") {
+    payload.kitchen = audience.kitchen;
+  }
+  // v1 clients read data.orderId / data.status off ORDER_UPDATE directly; make
+  // sure they are always present even if the caller omitted `legacy`.
+  if (type === EVENT_ORDER_UPDATE && payload.orderId === undefined) {
+    const first = merged[0]?.delta as { orderId?: string; status?: string } | undefined;
+    if (first?.orderId) payload.orderId = first.orderId;
+    if (first?.status) payload.status = first.status;
+  }
+  return payload;
+}

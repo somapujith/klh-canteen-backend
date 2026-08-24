@@ -12,7 +12,17 @@ import type { AppEnv, Bindings } from "../types.js";
  * the rate limiter and sseService both treat as a graceful no-op.
  */
 export function getBindings(c: Context<AppEnv>): Bindings {
-  return env<Bindings>(c);
+  const base = env<Bindings>(c);
+  // hono/adapter's env() is runtime-dispatched: on workerd it IS c.env, but on
+  // Node it returns process.env and ignores c.env entirely. process.env holds
+  // strings, so a non-string binding — a Durable Object namespace, or the
+  // in-process stand-in the Node server installs (services/nodeEventsHub.ts) —
+  // can only be delivered through c.env. Overlaying it here is what lets one
+  // getBindings() serve both runtimes; without it the Node hub would be
+  // constructed and then never found, which is the shape of the bug this
+  // fixes.
+  const injected = c.env as Partial<Bindings> | undefined;
+  return injected && typeof injected === "object" ? { ...base, ...injected } : base;
 }
 
 /**

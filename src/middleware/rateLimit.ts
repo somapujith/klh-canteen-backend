@@ -1,5 +1,6 @@
 import type { Context, MiddlewareHandler } from "hono";
 import { env } from "hono/adapter";
+import { getBindings } from "../lib/context.js";
 import { verifyToken } from "../lib/jwt.js";
 import { ApiError } from "./errorHandler.js";
 import type { AppEnv } from "../types.js";
@@ -103,7 +104,7 @@ const DEFAULT_DELAY_MAX_MS = 3_000;
 
 export function rateLimit(options: RateLimitOptions): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
-    const { RATE_LIMITER_HUB } = env<{ RATE_LIMITER_HUB?: DurableObjectNamespace }>(c);
+    const { RATE_LIMITER_HUB } = getBindings(c) as { RATE_LIMITER_HUB?: DurableObjectNamespace };
     if (!RATE_LIMITER_HUB) {
       await next();
       return;
@@ -148,7 +149,7 @@ export async function resetRateLimit(
   prefix: string,
   identity: string
 ): Promise<void> {
-  const { RATE_LIMITER_HUB } = env<{ RATE_LIMITER_HUB?: DurableObjectNamespace }>(c);
+  const { RATE_LIMITER_HUB } = getBindings(c) as { RATE_LIMITER_HUB?: DurableObjectNamespace };
   if (!RATE_LIMITER_HUB) return;
 
   try {
