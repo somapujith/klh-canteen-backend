@@ -221,6 +221,66 @@ describeDb("realtime hub under Node", () => {
     expect(boardFrames.length).toBeLessThan(3);
   });
 
+  it("pushes a status change to the student who placed the order", async () => {
+    // The point of the whole chain, from the student's side: they are standing
+    // at the counter watching their token, the kitchen marks it cooked, and the
+    // screen has to move on its own. The board's KITCHEN-scoped frame is no use
+    // to them — this asserts the separate owner-scoped ORDER_UPDATE.
+    const admin = await createAdmin({ kitchen: "SNACKS" });
+    const student = await createStudent();
+    const item = await createMenuItem({ kitchen: "SNACKS", stockQty: 10 });
+    const studentToken = tokenFor(student);
+
+    const placed = await placeOrder(studentToken, item.id);
+    expect(placed.status).toBe(201);
+    const orderId = ((await placed.json()) as any[])[0].id;
+
+    const stream = await call(`/events/stream?token=${studentToken}`);
+    expect(stream.status).toBe(200);
+    const collected = readFramesUntil(stream, (f) => f.event === "ORDER_UPDATE", 6000);
+
+    const patched = await call(`/admin/orders/${orderId}/status`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${tokenFor(admin)}` },
+      body: JSON.stringify({ status: "COOKED" }),
+    });
+    expect(patched.status).toBe(200);
+
+    const frames = await collected;
+    const update = frames.find((f) => f.event === "ORDER_UPDATE");
+    expect(update, `no ORDER_UPDATE; saw ${frames.map((f) => f.event).join(", ")}`).toBeDefined();
+
+    const delta = (update!.data.deltas as any[]).find((d) => d.kind === "ORDER_STATUS");
+    expect(delta).toBeDefined();
+    expect(delta.orderId).toBe(orderId);
+    expect(delta.status).toBe("COOKED");
+    // v1 clients read these off the payload directly; they must not disappear.
+    expect(update!.data.orderId).toBe(orderId);
+    expect(update!.data.status).toBe("COOKED");
+  });
+
+  it("does not leak one student's order update to another student", async () => {
+    const admin = await createAdmin({ kitchen: "SNACKS" });
+    const owner = await createStudent();
+    const bystander = await createStudent();
+    const item = await createMenuItem({ kitchen: "SNACKS", stockQty: 10 });
+
+    const placed = await placeOrder(tokenFor(owner), item.id);
+    const orderId = ((await placed.json()) as any[])[0].id;
+
+    const stream = await call(`/events/stream?token=${tokenFor(bystander)}`);
+    const collected = readFramesUntil(stream, (f) => f.event === "ORDER_UPDATE", 2500);
+
+    await call(`/admin/orders/${orderId}/status`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${tokenFor(admin)}` },
+      body: JSON.stringify({ status: "COOKED" }),
+    });
+
+    const frames = await collected;
+    expect(frames.some((f) => f.event === "ORDER_UPDATE")).toBe(false);
+  });
+
   it("tells a client with an impossible cursor to resync rather than replaying nothing", async () => {
     const admin = await createAdmin({ kitchen: "SNACKS" });
     // A cursor from a previous process: this hub's seq is 0, so 999 is ahead.
