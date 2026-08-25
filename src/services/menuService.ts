@@ -1,6 +1,32 @@
 import type { PrismaClient } from "@prisma/client";
 import { ApiError } from "../middleware/errorHandler.js";
 
+/**
+ * The menu, from two different points of view.
+ *
+ * STOCK MEANS DIFFERENT THINGS TO THE TWO CALLERS, and conflating them was a
+ * bug in both directions:
+ *
+ *   A CUSTOMER cares what they can still buy, which is `stockQty` minus the
+ *   portions already claimed by orders that have not been collected yet. This
+ *   used to return the raw `stockQty`, so the menu advertised portions other
+ *   people had already reserved. The realtime path never had that fault — see
+ *   emitStockForOrders() in routes/orders.ts, which has always broadcast
+ *   `stockQty - reservedQty` — so the first SSE delta after page load visibly
+ *   corrected the number downwards. Worse, an item whose whole stock was
+ *   reserved still advertised portions, and the order only failed at the
+ *   claim, after the student had committed to it.
+ *
+ *   AN ADMIN cares what is physically on the counter, because that is the
+ *   number they restock against. They get the raw `stockQty` plus
+ *   `reservedQty` alongside it, so the customer-facing figure is derivable
+ *   rather than guessed at.
+ *
+ * The customer projection is deliberately identical to the one emitStockForOrders
+ * broadcasts, including the `isAvailable` rule: a fully reserved item reads as
+ * sold out rather than disappearing, which is what the menu already renders for
+ * a zero-stock item.
+ */
 export async function getCategorizedMenu(prisma: PrismaClient, kitchen?: string, isAdmin?: boolean) {
   const where = kitchen ? { kitchen: kitchen as any } : {};
   const categories = await prisma.category.findMany({
@@ -8,11 +34,28 @@ export async function getCategorizedMenu(prisma: PrismaClient, kitchen?: string,
     orderBy: { sortOrder: "asc" },
     include: {
       items: {
+        // An admin must see the items they have switched off — hiding one is
+        // reversible only if it is still on the page that hid it.
         where: isAdmin ? undefined : { isAvailable: true },
       },
     },
   });
-  return { categories };
+
+  if (isAdmin) return { categories };
+
+  return {
+    categories: categories.map((category) => ({
+      ...category,
+      items: category.items.map((item) => {
+        const available = Math.max(0, item.stockQty - item.reservedQty);
+        return {
+          ...item,
+          stockQty: available,
+          isAvailable: item.isAvailable && available > 0,
+        };
+      }),
+    })),
+  };
 }
 
 export async function createCategory(prisma: PrismaClient, name: string, sortOrder: number, kitchen: string = "SNACKS") {
