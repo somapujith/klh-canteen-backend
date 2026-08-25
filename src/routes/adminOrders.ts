@@ -10,11 +10,14 @@ import {
   MAX_ORDER_PAGE_SIZE,
 } from "../services/orderService.js";
 import { emitOrderSeen, emitOrderStatusChanged, emitStockChanged } from "../services/sseService.js";
+import { notifyStudentOrderTelegram } from "../services/telegramService.js";
 import { guestSubjectIdOrNull } from "../services/guestSessionService.js";
 import { logAction } from "../services/auditService.js";
 import { getBindings, getRequestPrisma } from "../lib/context.js";
 import { ApiError } from "../middleware/errorHandler.js";
 import type { AppEnv } from "../types.js";
+
+// notifyStudentOrderTelegram on status patch — students only. User: order logs after telegram link.
 
 export const adminOrdersRouter = new Hono<AppEnv>();
 
@@ -150,6 +153,18 @@ adminOrdersRouter.patch("/:id/status", requireAuth("ADMIN"), async (c) => {
     orderNumber: order.orderNumber,
     deliveredAt: order.deliveredAt,
     subjectId: order.studentId ?? guestSubjectIdOrNull(order.guestSessionId),
+  });
+  await notifyStudentOrderTelegram(prisma, bindings, {
+    studentId: order.studentId,
+    orderNumber: order.orderNumber,
+    status: order.status,
+    kitchen: order.kitchen,
+    totalAmount: order.totalAmount,
+    items: order.items.map((i) => ({
+      name: i.menuItem.name,
+      quantity: i.quantity,
+    })),
+    kind: "status",
   });
   if (status === "DELIVERED") {
     // Stock is only decremented on delivery, so this is the one place a real

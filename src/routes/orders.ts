@@ -10,10 +10,14 @@ import {
   cancelOrder,
 } from "../services/orderService.js";
 import { emitOrderCreated, emitOrderStatusChanged, emitStockChanged } from "../services/sseService.js";
+import { notifyStudentOrderTelegram } from "../services/telegramService.js";
 import { toOrderSummary } from "../lib/orderSummary.js";
 import { getBindings, getRequestPrisma } from "../lib/context.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 import type { AppEnv } from "../types.js";
+
+// notifyStudentOrderTelegram: student-only order logs after create/cancel.
+// User: integrate telegram with students only; order logs after link.
 
 export const ordersRouter = new Hono<AppEnv>();
 
@@ -71,6 +75,23 @@ ordersRouter.post("/", requireAuth("STUDENT"), orderLimiter, async (c) => {
   // here — push the absolute level so every open menu patches itself instead of
   // showing portions that are already spoken for.
   await emitStockForOrders(prisma, bindings, orders);
+  // Student-only Telegram order logs (no-op for unlinked students / missing token).
+  await Promise.all(
+    orders.map((order) =>
+      notifyStudentOrderTelegram(prisma, bindings, {
+        studentId: order.studentId,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        kitchen: order.kitchen,
+        totalAmount: order.totalAmount,
+        items: order.items.map((i) => ({
+          name: i.menuItem.name,
+          quantity: i.quantity,
+        })),
+        kind: "created",
+      })
+    )
+  );
   return c.json(orders.map(serializeOrder), 201);
 });
 
@@ -130,6 +151,18 @@ ordersRouter.post("/:id/cancel", requireAuth("STUDENT"), async (c) => {
     kitchen: order.kitchen,
     orderNumber: order.orderNumber,
     subjectId: order.studentId,
+  });
+  await notifyStudentOrderTelegram(prisma, getBindings(c), {
+    studentId: order.studentId,
+    orderNumber: order.orderNumber,
+    status: order.status,
+    kitchen: order.kitchen,
+    totalAmount: order.totalAmount,
+    items: order.items.map((i) => ({
+      name: i.menuItem.name,
+      quantity: i.quantity,
+    })),
+    kind: "status",
   });
   return c.json(serializeOrder(order));
 });

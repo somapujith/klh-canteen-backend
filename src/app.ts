@@ -16,6 +16,7 @@ import { superAdminUsersRouter } from "./routes/superadminUsers.js";
 import { superAdminStudentsRouter } from "./routes/superadminStudents.js";
 import { superAdminCohortsRouter } from "./routes/superadminCohorts.js";
 import { superAdminExportsRouter } from "./routes/superadminExports.js";
+import { telegramRouter } from "./routes/telegram.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { rateLimit } from "./middleware/rateLimit.js";
 import type { AppEnv } from "./types.js";
@@ -79,6 +80,8 @@ export function createApp() {
   // Year-end cohort promotion (dry-run by default) and reconciliation exports.
   app.route("/superadmin/cohorts", superAdminCohortsRouter);
   app.route("/superadmin/exports", superAdminExportsRouter);
+  // Student Telegram link + bot webhook (students only; staff/guest never linked).
+  app.route("/telegram", telegramRouter);
 
   app.onError(async (err, c) => {
     const res = await errorHandler(err, c);

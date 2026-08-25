@@ -47,6 +47,15 @@ model User {
   /// used by logout-everywhere and by deactivation.
   tokensValidFrom    DateTime?
 
+  /// Telegram chat id for student order notifications. Set only for STUDENT
+  /// accounts via the deep-link flow; staff/guest never receive these.
+  telegramChatId          String?   @unique
+  telegramUsername        String?
+  telegramLinkedAt        DateTime?
+  /// One-time start payload for t.me/Bot?start=<code>. Cleared on link or expiry.
+  telegramLinkCode        String?   @unique
+  telegramLinkExpiresAt   DateTime?
+
   orders       Order[]
   auditLogs    AuditLog[]
 

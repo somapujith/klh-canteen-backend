@@ -23,8 +23,10 @@
   //   wrangler secret put DATABASE_URL
   //   wrangler secret put JWT_SECRET
   //   wrangler secret put QR_TOKEN_SECRET
-  // These populate env.DATABASE_URL / env.JWT_SECRET / env.QR_TOKEN_SECRET at
-  // runtime without ever being committed to source control.
+  //   wrangler secret put TELEGRAM_BOT_TOKEN
+  //   wrangler secret put TELEGRAM_BOT_USERNAME
+  //   wrangler secret put TELEGRAM_WEBHOOK_SECRET
+  // These populate env.* at runtime without ever being committed to source control.
 
   // Retained only for any non-rate-limit use. Rate limit counters moved off
   // KV to the RATE_LIMITER_HUB Durable Object below: KV's get-then-put is not

@@ -30,6 +30,12 @@ export interface Bindings {
    * editing auth code or writing to the live database.
    */
   ENFORCE_PASSWORD_CHANGE?: string;
+  /** Bot token from @BotFather. Set via wrangler secret / .env — never commit. */
+  TELEGRAM_BOT_TOKEN?: string;
+  /** Public @username without @. Optional if getMe can resolve it. */
+  TELEGRAM_BOT_USERNAME?: string;
+  /** Optional secret for X-Telegram-Bot-Api-Secret-Token on the webhook. */
+  TELEGRAM_WEBHOOK_SECRET?: string;
 }
 
 export interface AuthUser {
