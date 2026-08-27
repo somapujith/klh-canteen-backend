@@ -79,8 +79,10 @@ async function main() {
   for (const p of products) {
     const categoryId = catMap.get(p.cat)!;
     const stockQty = Math.floor(Math.random() * 50) + 20; // 20 to 69
-    // Using loremflickr for random contextual images based on keyword
-    const imageUrl = `https://loremflickr.com/400/400/${p.kw}?random=${i}`;
+    // picsum.photos (Lorem Picsum) — loremflickr regularly 500s in production,
+    // picsum is a stable CDN. Not content-matched to the item, just a seeded
+    // deterministic placeholder per product.
+    const imageUrl = `https://picsum.photos/seed/${p.kw}-${i}/400/400`;
 
     // No unique constraint on MenuItem.name — replicate the original
     // find-then-create (skip if a row with this name already exists).
