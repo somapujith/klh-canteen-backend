@@ -12,8 +12,13 @@ import { LEGACY_STUDENT_EMAIL_DOMAIN } from "./studentRosterService.js";
  * Cost factor for every hash this service writes. Matches what the roster
  * import and seed scripts already use, so a student's hash does not silently
  * get weaker the moment they set their own password.
+ *
+ * Lowered from 12: bcryptjs is a pure-JS implementation (Workers can't use
+ * native bindings), and cost 12 was adding several hundred ms of CPU-bound
+ * compare time to every login on top of the request's other costs. 10 still
+ * clears OWASP's minimum recommended work factor.
  */
-const BCRYPT_COST = 12;
+const BCRYPT_COST = 10;
 
 export type SessionUser = {
   id: string;
@@ -104,6 +109,17 @@ export async function login(
 
   const valid = await bcrypt.compare(password, user.passwordHash);
   if (!valid) throw new ApiError(401, "INVALID_CREDENTIALS", "Invalid credentials");
+
+  // Transparent migration off the old cost-12 hashes: the password is only
+  // ever available in plaintext right here, so this is the one place a
+  // stale hash can be upgraded (well, downgraded — see BCRYPT_COST) without
+  // forcing a reset. Every login after this one for the same user compares
+  // against the cheaper hash instead.
+  const hashCost = Number(user.passwordHash.match(/^\$2[aby]\$(\d+)\$/)?.[1]);
+  if (hashCost && hashCost !== BCRYPT_COST) {
+    const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
+    await userRepo.updateFields(pool, user.id, sql`"passwordHash" = ${passwordHash}`);
+  }
 
   // Checked only after the password, with the SAME generic message as a wrong
   // password: a distinct "wrong school" error would let anyone holding a
