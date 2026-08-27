@@ -157,41 +157,59 @@ adminOrdersRouter.patch("/:id/status", requireAuth("ADMIN"), async (c) => {
     await logAction(pool, user.id, "ORDER_STATUS_OVERRIDE", "Order", order.id, { kitchen: order.kitchen, status });
   }
   const bindings = getBindings(c);
-  // One call emits both the kitchen-board patch and the owner's personal
-  // notification. The owner is a student OR a walk-up guest session — a guest
-  // watching the counter screen needs their push as much as a student does.
-  await emitOrderStatusChanged(bindings, {
-    orderId: order.id,
-    status: order.status,
-    kitchen: order.kitchen,
-    orderNumber: order.orderNumber,
-    deliveredAt: order.deliveredAt,
-    subjectId: order.studentId ?? guestSubjectIdOrNull(order.guestSessionId),
-  });
-  await notifyStudentOrderTelegram(pool, bindings, {
-    studentId: order.studentId,
-    orderNumber: order.orderNumber,
-    status: order.status,
-    kitchen: order.kitchen,
-    totalAmount: order.totalAmount,
-    items: order.items.map((i) => ({
-      name: i.menuItem.name,
-      quantity: i.quantity,
-    })),
-    kind: "status",
-  });
-  if (status === "DELIVERED") {
-    // Stock is only decremented on delivery, so this is the one place a real
-    // stock delta exists. Absolute levels, never diffs.
-    await emitStockChanged(
-      bindings,
-      order.items.map((i) => ({
-        menuItemId: i.menuItemId,
-        stockQty: i.menuItem.stockQty,
-        isAvailable: i.menuItem.isAvailable,
-        kitchen: order.kitchen,
-      }))
-    );
+  // Everything below is a notification to someone OTHER than the admin who
+  // just clicked "Food collected" — the kitchen board's other viewers, the
+  // order owner's live tracker, Telegram. None of it changes what this
+  // response says, and the admin's flow chains two of these PATCHes back to
+  // back (COOKED then DELIVERED), so blocking each one on an SSE broadcast +
+  // a live Telegram API call was pure added latency on the hot path.
+  // waitUntil lets it all finish after the response is already on the wire.
+  const notify = async () => {
+    // One call emits both the kitchen-board patch and the owner's personal
+    // notification. The owner is a student OR a walk-up guest session — a
+    // guest watching the counter screen needs their push as much as a
+    // student does.
+    await emitOrderStatusChanged(bindings, {
+      orderId: order.id,
+      status: order.status,
+      kitchen: order.kitchen,
+      orderNumber: order.orderNumber,
+      deliveredAt: order.deliveredAt,
+      subjectId: order.studentId ?? guestSubjectIdOrNull(order.guestSessionId),
+    });
+    await notifyStudentOrderTelegram(pool, bindings, {
+      studentId: order.studentId,
+      orderNumber: order.orderNumber,
+      status: order.status,
+      kitchen: order.kitchen,
+      totalAmount: order.totalAmount,
+      items: order.items.map((i) => ({
+        name: i.menuItem.name,
+        quantity: i.quantity,
+      })),
+      kind: "status",
+    });
+    if (status === "DELIVERED") {
+      // Stock is only decremented on delivery, so this is the one place a
+      // real stock delta exists. Absolute levels, never diffs.
+      await emitStockChanged(
+        bindings,
+        order.items.map((i) => ({
+          menuItemId: i.menuItemId,
+          stockQty: i.menuItem.stockQty,
+          isAvailable: i.menuItem.isAvailable,
+          kitchen: order.kitchen,
+        }))
+      );
+    }
+  };
+  // c.executionCtx is a getter that throws outside Workers (the Node test
+  // harness has none) rather than returning undefined, so this needs a
+  // try/catch rather than optional chaining.
+  try {
+    c.executionCtx.waitUntil(notify());
+  } catch {
+    await notify();
   }
   return c.json({ ...order, totalAmount: Number(order.totalAmount).toFixed(2) });
 });
