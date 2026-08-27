@@ -17,7 +17,7 @@ const pool = getPool(process.env.DATABASE_URL!);
  * than left to the column default — an exemption that depends on a default is
  * an exemption that silently disappears the day the default changes:
  *
- *   superadmin@klh.edu.in / snacks_admin@klh.edu.in / meals_admin@klh.edu.in
+ *   superadmin@klh.edu.in / admin@klh.edu.in
  *     The only way back into the admin UI. Flagging them means nobody can
  *     reach the screen that un-flags anybody.
  *   student@klh.edu.in
@@ -42,12 +42,13 @@ const pool = getPool(process.env.DATABASE_URL!);
  * disarms the gate app-wide without touching a single row.
  */
 
+/** Emails the two old kitchen-scoped admins used to have. Deactivated, not
+ * deleted — both have AuditLog rows and AuditLog.actorId is ON DELETE
+ * RESTRICT, so a hard delete isn't just undesirable here, it would fail. */
+const RETIRED_KITCHEN_ADMIN_EMAILS = ["snacks_admin@klh.edu.in", "meals_admin@klh.edu.in"];
+
 /** Accounts that must keep working without a forced password change. */
-const EXEMPT_EMAILS = [
-  "superadmin@klh.edu.in",
-  "snacks_admin@klh.edu.in",
-  "meals_admin@klh.edu.in",
-];
+const EXEMPT_EMAILS = ["superadmin@klh.edu.in", "admin@klh.edu.in"];
 
 async function main() {
   const email = process.env.SEED_ADMIN_EMAIL ?? "admin@klh.edu.in";
@@ -59,36 +60,30 @@ async function main() {
   const studentRollNumber = process.env.SEED_STUDENT_ROLL ?? "2400000001";
   const studentPasswordHash = await bcrypt.hash(studentPassword, 12);
 
-  // Snacks Admin
+  // Admin — kitchen deliberately NOT set (stays NULL), which every kitchen
+  // check in the codebase (`user.kitchen || undefined`) treats as
+  // unrestricted: this one account sees and manages both SNACKS and MEALS,
+  // orders and menu alike. Replaces the old snacks_admin/meals_admin split.
   await query<User>(
     pool,
     sql`
-      INSERT INTO "User" ("id", "email", "passwordHash", "name", "role", "kitchen", "mustChangePassword")
-      VALUES (${crypto.randomUUID()}, 'snacks_admin@klh.edu.in', ${passwordHash}, 'Snacks Admin', 'ADMIN'::"Role", 'SNACKS'::"Kitchen", false)
+      INSERT INTO "User" ("id", "email", "passwordHash", "name", "role", "mustChangePassword")
+      VALUES (${crypto.randomUUID()}, ${email}, ${passwordHash}, 'Admin', 'ADMIN'::"Role", false)
       ON CONFLICT ("email") DO UPDATE SET
         "passwordHash" = EXCLUDED."passwordHash",
         "name" = EXCLUDED."name",
-        "kitchen" = EXCLUDED."kitchen",
+        "kitchen" = NULL,
         "mustChangePassword" = EXCLUDED."mustChangePassword",
         "isActive" = true
       RETURNING *
     `,
   );
 
-  // Meals Admin
-  await query<User>(
+  // Retire the old per-kitchen admins. Deactivated, not deleted — see the
+  // comment on RETIRED_KITCHEN_ADMIN_EMAILS for why a hard delete is out.
+  await query(
     pool,
-    sql`
-      INSERT INTO "User" ("id", "email", "passwordHash", "name", "role", "kitchen", "mustChangePassword")
-      VALUES (${crypto.randomUUID()}, 'meals_admin@klh.edu.in', ${passwordHash}, 'Meals Admin', 'ADMIN'::"Role", 'MEALS'::"Kitchen", false)
-      ON CONFLICT ("email") DO UPDATE SET
-        "passwordHash" = EXCLUDED."passwordHash",
-        "name" = EXCLUDED."name",
-        "kitchen" = EXCLUDED."kitchen",
-        "mustChangePassword" = EXCLUDED."mustChangePassword",
-        "isActive" = true
-      RETURNING *
-    `,
+    sql`UPDATE "User" SET "isActive" = false WHERE "email" = ANY(${RETIRED_KITCHEN_ADMIN_EMAILS}::text[])`,
   );
 
   // Super Admin
@@ -123,7 +118,8 @@ async function main() {
   );
 
   console.log(`Student seeded: ${studentEmail} (roll ${studentRollNumber})`);
-  console.log("Admins seeded: snacks_admin@klh.edu.in & meals_admin@klh.edu.in & superadmin@klh.edu.in");
+  console.log(`Admins seeded: ${email} (unrestricted) & superadmin@klh.edu.in`);
+  console.log(`Retired (deactivated): ${RETIRED_KITCHEN_ADMIN_EMAILS.join(", ")}`);
   console.log("Seeded accounts are exempt from the forced password change (mustChangePassword=false).");
 
   await flagExistingStudentsIfRequested(studentEmail);

@@ -25,7 +25,7 @@ function toSafeUser(user: User): SafeUser {
 
 /**
  * Accounts that bulk and cohort deactivation refuse to touch, whatever the
- * filter matched. The three staff logins are the only way back into the admin
+ * filter matched. The two staff logins are the only way back into the admin
  * UI, and `student@klh.edu.in` is the shared demo/load-test account whose roll
  * number (2400000001) shares the "24" intake prefix with the entire real
  * student roster — so the single most natural cohort selection would sweep it
@@ -34,8 +34,7 @@ function toSafeUser(user: User): SafeUser {
  */
 export const PROTECTED_ACCOUNT_EMAILS: readonly string[] = [
   "superadmin@klh.edu.in",
-  "snacks_admin@klh.edu.in",
-  "meals_admin@klh.edu.in",
+  "admin@klh.edu.in",
   "student@klh.edu.in",
 ];
 
