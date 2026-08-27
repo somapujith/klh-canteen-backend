@@ -23,7 +23,6 @@
  * parameters as text, and Postgres does not implicitly cast text to a custom
  * enum type in a comparison or insert.
  */
-import crypto from "node:crypto";
 import type { Pool, PoolClient } from "@neondatabase/serverless";
 import { sql, raw, joinSql, query } from "./sql.js";
 import type { SqlFragment } from "./sql.js";

@@ -8,7 +8,6 @@
  * back into an object on SELECT — no `JSON.stringify`/`JSON.parse` needed,
  * same as node-postgres.
  */
-import crypto from "node:crypto";
 import type { Pool, PoolClient } from "@neondatabase/serverless";
 import { sql, raw, query } from "./sql.js";
 import type { AuditLog, Role } from "./schema.js";
