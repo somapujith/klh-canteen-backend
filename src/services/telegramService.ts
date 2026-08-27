@@ -8,7 +8,9 @@
  * Failures to reach Telegram are logged and swallowed so an outage never fails
  * an order write.
  */
-import type { PrismaClient } from "@prisma/client";
+import type { Pool } from "@neondatabase/serverless";
+import { sql, joinSql } from "../db/sql.js";
+import * as userRepo from "../db/userRepo.js";
 import { ApiError } from "../middleware/errorHandler.js";
 
 const LINK_TTL_MS = 15 * 60 * 1000;
@@ -98,19 +100,11 @@ export interface TelegramStatus {
 }
 
 export async function getTelegramStatus(
-  prisma: PrismaClient,
+  pool: Pool,
   env: TelegramEnv,
   studentId: string
 ): Promise<TelegramStatus> {
-  const user = await prisma.user.findUnique({
-    where: { id: studentId },
-    select: {
-      role: true,
-      telegramChatId: true,
-      telegramUsername: true,
-      telegramLinkedAt: true,
-    },
-  });
+  const user = await userRepo.findById(pool, studentId);
   if (!user || user.role !== "STUDENT") {
     throw new ApiError(403, "FORBIDDEN", "Only students can link Telegram.");
   }
@@ -140,17 +134,14 @@ export interface LinkStartResult {
 
 /** Mint a fresh deep-link code for this student. Replaces any previous pending code. */
 export async function startTelegramLink(
-  prisma: PrismaClient,
+  pool: Pool,
   env: TelegramEnv,
   studentId: string
 ): Promise<LinkStartResult> {
   tokenOrThrow(env);
   const botUsername = await resolveBotUsername(env);
 
-  const user = await prisma.user.findUnique({
-    where: { id: studentId },
-    select: { id: true, role: true, telegramChatId: true },
-  });
+  const user = await userRepo.findById(pool, studentId);
   if (!user || user.role !== "STUDENT") {
     throw new ApiError(403, "FORBIDDEN", "Only students can link Telegram.");
   }
@@ -161,10 +152,11 @@ export async function startTelegramLink(
   const code = randomLinkCode();
   const expiresAt = new Date(Date.now() + LINK_TTL_MS);
 
-  await prisma.user.update({
-    where: { id: studentId },
-    data: { telegramLinkCode: code, telegramLinkExpiresAt: expiresAt },
-  });
+  await userRepo.updateFields(
+    pool,
+    studentId,
+    joinSql([sql`"telegramLinkCode" = ${code}`, sql`"telegramLinkExpiresAt" = ${expiresAt}`]),
+  );
 
   return {
     deepLink: `https://t.me/${botUsername}?start=${code}`,
@@ -174,13 +166,10 @@ export async function startTelegramLink(
 }
 
 export async function unlinkTelegram(
-  prisma: PrismaClient,
+  pool: Pool,
   studentId: string
 ): Promise<{ unlinked: true }> {
-  const user = await prisma.user.findUnique({
-    where: { id: studentId },
-    select: { id: true, role: true, telegramChatId: true },
-  });
+  const user = await userRepo.findById(pool, studentId);
   if (!user || user.role !== "STUDENT") {
     throw new ApiError(403, "FORBIDDEN", "Only students can unlink Telegram.");
   }
@@ -188,16 +177,17 @@ export async function unlinkTelegram(
     throw new ApiError(409, "NOT_LINKED", "Telegram is not linked.");
   }
 
-  await prisma.user.update({
-    where: { id: studentId },
-    data: {
-      telegramChatId: null,
-      telegramUsername: null,
-      telegramLinkedAt: null,
-      telegramLinkCode: null,
-      telegramLinkExpiresAt: null,
-    },
-  });
+  await userRepo.updateFields(
+    pool,
+    studentId,
+    joinSql([
+      sql`"telegramChatId" = ${null}`,
+      sql`"telegramUsername" = ${null}`,
+      sql`"telegramLinkedAt" = ${null}`,
+      sql`"telegramLinkCode" = ${null}`,
+      sql`"telegramLinkExpiresAt" = ${null}`,
+    ]),
+  );
 
   return { unlinked: true };
 }
@@ -216,7 +206,7 @@ interface TelegramUpdate {
  * presses Start with a valid one-time code.
  */
 export async function handleTelegramUpdate(
-  prisma: PrismaClient,
+  pool: Pool,
   env: TelegramEnv,
   update: TelegramUpdate
 ): Promise<void> {
@@ -229,10 +219,7 @@ export async function handleTelegramUpdate(
 
   if (!text.startsWith("/start")) {
     if (text === "/unlink" || text === "/status") {
-      const linked = await prisma.user.findFirst({
-        where: { telegramChatId: chatIdStr, role: "STUDENT" },
-        select: { rollNumber: true, name: true },
-      });
+      const linked = await userRepo.findStudentByTelegramChatId(pool, chatIdStr);
       if (text === "/status") {
         await sendTelegramMessage(
           env,
@@ -262,14 +249,7 @@ export async function handleTelegramUpdate(
     return;
   }
 
-  const student = await prisma.user.findFirst({
-    where: {
-      role: "STUDENT",
-      telegramLinkCode: payload,
-      telegramLinkExpiresAt: { gt: new Date() },
-    },
-    select: { id: true, name: true, rollNumber: true },
-  });
+  const student = await userRepo.findStudentByTelegramLinkCode(pool, payload);
 
   if (!student) {
     await sendTelegramMessage(
@@ -280,10 +260,7 @@ export async function handleTelegramUpdate(
     return;
   }
 
-  const taken = await prisma.user.findFirst({
-    where: { telegramChatId: chatIdStr, NOT: { id: student.id } },
-    select: { id: true },
-  });
+  const taken = await userRepo.findByTelegramChatIdExcluding(pool, chatIdStr, student.id);
   if (taken) {
     await sendTelegramMessage(
       env,
@@ -293,16 +270,17 @@ export async function handleTelegramUpdate(
     return;
   }
 
-  await prisma.user.update({
-    where: { id: student.id },
-    data: {
-      telegramChatId: chatIdStr,
-      telegramUsername: username,
-      telegramLinkedAt: new Date(),
-      telegramLinkCode: null,
-      telegramLinkExpiresAt: null,
-    },
-  });
+  await userRepo.updateFields(
+    pool,
+    student.id,
+    joinSql([
+      sql`"telegramChatId" = ${chatIdStr}`,
+      sql`"telegramUsername" = ${username}`,
+      sql`"telegramLinkedAt" = ${new Date()}`,
+      sql`"telegramLinkCode" = ${null}`,
+      sql`"telegramLinkExpiresAt" = ${null}`,
+    ]),
+  );
 
   const roll = student.rollNumber ?? "—";
   await sendTelegramMessage(
@@ -328,16 +306,13 @@ export interface NotifyOrderInput {
  * unlinked students, or missing bot config.
  */
 export async function notifyStudentOrderTelegram(
-  prisma: PrismaClient,
+  pool: Pool,
   env: TelegramEnv,
   input: NotifyOrderInput
 ): Promise<void> {
   if (!input.studentId || !env.TELEGRAM_BOT_TOKEN?.trim()) return;
 
-  const user = await prisma.user.findUnique({
-    where: { id: input.studentId },
-    select: { role: true, telegramChatId: true, name: true, rollNumber: true },
-  });
+  const user = await userRepo.findById(pool, input.studentId);
   if (!user || user.role !== "STUDENT" || !user.telegramChatId) return;
 
   const lines: string[] = [];

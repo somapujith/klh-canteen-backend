@@ -8,11 +8,58 @@ import {
 } from "../src/services/orderService.js";
 import { ApiError } from "../src/middleware/errorHandler.js";
 import { issueGuestSession } from "../src/services/guestSessionService.js";
-import { describeDb, getTestPrisma, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
+import { describeDb, getTestPool, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
 import { startTestServer, closeTestServer, createMenuItem } from "./helpers/app.js";
+import { sql, query } from "../src/db/sql.js";
+import type { Order, CollectionWindow } from "../src/db/schema.js";
+import crypto from "node:crypto";
 
-const prisma = testDb.enabled ? getTestPrisma() : (undefined as any);
+const pool = testDb.enabled ? getTestPool() : (undefined as any);
 const server = testDb.enabled ? await startTestServer() : (undefined as any);
+
+async function findOrder(id: string): Promise<Order | null> {
+  const { rows } = await query<Order>(pool, sql`SELECT * FROM "Order" WHERE "id" = ${id}`);
+  return rows[0] ?? null;
+}
+
+async function countOrders(collectionAt?: Date): Promise<number> {
+  const where = collectionAt ? sql`WHERE "collectionAt" = ${collectionAt.toISOString()}::timestamp` : sql``;
+  const { rows } = await query<{ count: string }>(pool, sql`SELECT COUNT(*)::bigint AS count FROM "Order" ${where}`);
+  return Number(rows[0].count);
+}
+
+async function createCollectionWindow(data: {
+  startAt: Date;
+  kitchen: "SNACKS" | "MEALS";
+  capacity: number;
+  bookedCount: number;
+}): Promise<CollectionWindow> {
+  const { rows } = await query<CollectionWindow>(
+    pool,
+    sql`
+      INSERT INTO "CollectionWindow" ("id", "startAt", "kitchen", "capacity", "bookedCount")
+      VALUES (${crypto.randomUUID()}, ${data.startAt.toISOString()}::timestamp, ${data.kitchen}::"Kitchen", ${data.capacity}, ${data.bookedCount})
+      RETURNING *
+    `,
+  );
+  return rows[0];
+}
+
+async function findCollectionWindow(startAt: Date, kitchen?: "SNACKS" | "MEALS"): Promise<CollectionWindow | null> {
+  const where = kitchen
+    ? sql`"startAt" = ${startAt.toISOString()}::timestamp AND "kitchen" = ${kitchen}::"Kitchen"`
+    : sql`"startAt" = ${startAt.toISOString()}::timestamp`;
+  const { rows } = await query<CollectionWindow>(pool, sql`SELECT * FROM "CollectionWindow" WHERE ${where} LIMIT 1`);
+  return rows[0] ?? null;
+}
+
+async function findCollectionWindows(startAt: Date): Promise<CollectionWindow[]> {
+  const { rows } = await query<CollectionWindow>(
+    pool,
+    sql`SELECT * FROM "CollectionWindow" WHERE "startAt" = ${startAt.toISOString()}::timestamp`,
+  );
+  return rows;
+}
 
 const SESSION_HEADER = "X-Guest-Session";
 const SECRET = process.env.QR_TOKEN_SECRET!;
@@ -94,10 +141,11 @@ describeDb("pre-booking through POST /guest/orders", () => {
     const res = await place({ items: [{ menuItemId: item.id, qty: 1 }] });
 
     expect(res.status).toBe(201);
-    const stored = await prisma.order.findUnique({ where: { id: res.body[0].id } });
+    const stored = await findOrder(res.body[0].id);
     expect(stored!.collectionAt).toBeNull();
     // ASAP orders take no window seat at all.
-    expect(await prisma.collectionWindow.count()).toBe(0);
+    const { rows: windowCount } = await query<{ count: string }>(pool, sql`SELECT COUNT(*)::bigint AS count FROM "CollectionWindow"`);
+    expect(Number(windowCount[0].count)).toBe(0);
   });
 
   it("books a seat in the requested window and floors the time to the slot", async () => {
@@ -111,10 +159,10 @@ describeDb("pre-booking through POST /guest/orders", () => {
     });
 
     expect(res.status).toBe(201);
-    const stored = await prisma.order.findUnique({ where: { id: res.body[0].id } });
+    const stored = await findOrder(res.body[0].id);
     expect(stored!.collectionAt!.toISOString()).toBe(slot.toISOString());
 
-    const window = await prisma.collectionWindow.findFirst({ where: { startAt: slot } });
+    const window = await findCollectionWindow(slot);
     expect(window!.bookedCount).toBe(1);
   });
 
@@ -129,7 +177,7 @@ describeDb("pre-booking through POST /guest/orders", () => {
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe("COLLECTION_WINDOW_PAST");
     // Nothing was written: the time is validated before the transaction opens.
-    expect(await prisma.order.count()).toBe(0);
+    expect(await countOrders()).toBe(0);
   });
 
   it(`rejects a time more than ${MAX_PREBOOK_DAYS} days ahead`, async () => {
@@ -147,9 +195,7 @@ describeDb("pre-booking through POST /guest/orders", () => {
   it("returns 409 COLLECTION_WINDOW_FULL once the window's capacity is used up", async () => {
     const item = await createMenuItem({ stockQty: 50 });
     const slot = futureSlot();
-    await prisma.collectionWindow.create({
-      data: { startAt: slot, kitchen: "SNACKS", capacity: 1, bookedCount: 0 },
-    });
+    await createCollectionWindow({ startAt: slot, kitchen: "SNACKS", capacity: 1, bookedCount: 0 });
 
     const first = await place({
       items: [{ menuItemId: item.id, qty: 1 }],
@@ -166,17 +212,15 @@ describeDb("pre-booking through POST /guest/orders", () => {
     expect(second.body.error.code).toBe("COLLECTION_WINDOW_FULL");
 
     // The refused order left nothing behind, and the seat count did not move.
-    expect(await prisma.order.count()).toBe(1);
-    const window = await prisma.collectionWindow.findFirst({ where: { startAt: slot } });
+    expect(await countOrders()).toBe(1);
+    const window = await findCollectionWindow(slot);
     expect(window!.bookedCount).toBe(1);
   });
 
   it("still serves ASAP orders for a kitchen whose window is full", async () => {
     const item = await createMenuItem({ stockQty: 50 });
     const slot = futureSlot();
-    await prisma.collectionWindow.create({
-      data: { startAt: slot, kitchen: "SNACKS", capacity: 1, bookedCount: 1 },
-    });
+    await createCollectionWindow({ startAt: slot, kitchen: "SNACKS", capacity: 1, bookedCount: 1 });
 
     const asap = await place({ items: [{ menuItemId: item.id, qty: 1 }] });
     expect(asap.status).toBe(201);
@@ -194,9 +238,7 @@ describeDb("pre-booking through POST /guest/orders", () => {
     const item = await createMenuItem({ stockQty: 200 });
     const slot = futureSlot();
     const capacity = 3;
-    await prisma.collectionWindow.create({
-      data: { startAt: slot, kitchen: "SNACKS", capacity, bookedCount: 0 },
-    });
+    await createCollectionWindow({ startAt: slot, kitchen: "SNACKS", capacity, bookedCount: 0 });
 
     const results = await Promise.all(
       Array.from({ length: 12 }, () =>
@@ -212,10 +254,10 @@ describeDb("pre-booking through POST /guest/orders", () => {
     expect(created).toHaveLength(capacity);
     expect(created.length + full.length).toBe(12);
 
-    const window = await prisma.collectionWindow.findFirst({ where: { startAt: slot } });
+    const window = await findCollectionWindow(slot);
     expect(window!.bookedCount).toBe(capacity);
     expect(window!.bookedCount).toBeLessThanOrEqual(window!.capacity);
-    expect(await prisma.order.count({ where: { collectionAt: slot } })).toBe(capacity);
+    expect(await countOrders(slot)).toBe(capacity);
   });
 
   it("claims a seat in EACH kitchen's window for a cart that spans both", async () => {
@@ -234,18 +276,16 @@ describeDb("pre-booking through POST /guest/orders", () => {
     expect(res.status).toBe(201);
     expect(res.body).toHaveLength(2);
 
-    const windows = await prisma.collectionWindow.findMany({ where: { startAt: slot } });
-    expect(windows.map((w: { kitchen: string }) => w.kitchen).sort()).toEqual(["MEALS", "SNACKS"]);
-    expect(windows.every((w: { bookedCount: number }) => w.bookedCount === 1)).toBe(true);
+    const windows = await findCollectionWindows(slot);
+    expect(windows.map((w) => w.kitchen).sort()).toEqual(["MEALS", "SNACKS"]);
+    expect(windows.every((w) => w.bookedCount === 1)).toBe(true);
   });
 
   it("does not half-book a two-kitchen cart when one kitchen's window is full", async () => {
     const snack = await createMenuItem({ stockQty: 10, kitchen: "SNACKS" });
     const meal = await createMenuItem({ stockQty: 10, kitchen: "MEALS" });
     const slot = futureSlot();
-    await prisma.collectionWindow.create({
-      data: { startAt: slot, kitchen: "MEALS", capacity: 1, bookedCount: 1 },
-    });
+    await createCollectionWindow({ startAt: slot, kitchen: "MEALS", capacity: 1, bookedCount: 1 });
 
     const res = await place({
       items: [
@@ -257,10 +297,8 @@ describeDb("pre-booking through POST /guest/orders", () => {
 
     expect(res.status).toBe(409);
     // The SNACKS half must not survive the failed MEALS half.
-    expect(await prisma.order.count()).toBe(0);
-    const snacksWindow = await prisma.collectionWindow.findFirst({
-      where: { startAt: slot, kitchen: "SNACKS" },
-    });
+    expect(await countOrders()).toBe(0);
+    const snacksWindow = await findCollectionWindow(slot, "SNACKS");
     expect(snacksWindow?.bookedCount ?? 0).toBe(0);
   });
 });
@@ -268,9 +306,7 @@ describeDb("pre-booking through POST /guest/orders", () => {
 describeDb("GET /guest/collection-windows", () => {
   it("reports remaining capacity so a client can grey out full slots", async () => {
     const slot = futureSlot();
-    await prisma.collectionWindow.create({
-      data: { startAt: slot, kitchen: "SNACKS", capacity: 4, bookedCount: 4 },
-    });
+    await createCollectionWindow({ startAt: slot, kitchen: "SNACKS", capacity: 4, bookedCount: 4 });
 
     const res = await request(server)
       .get("/guest/collection-windows?kitchen=SNACKS")

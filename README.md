@@ -1,6 +1,7 @@
 # KLH Canteen Backend
 
-Node.js + Express + PostgreSQL (Prisma) API for the KLH Pantry App.
+Hono + PostgreSQL (raw SQL via `@neondatabase/serverless`) API for the KLH
+Pantry App, deployed on Cloudflare Workers.
 
 ## Local dev
 
@@ -8,7 +9,7 @@ Node.js + Express + PostgreSQL (Prisma) API for the KLH Pantry App.
 cp .env.example .env
 docker compose up -d
 npm install
-npx prisma migrate dev
+npm run migrate:deploy
 npm run dev
 ```
 
@@ -68,10 +69,9 @@ npm run deploy
 
 ### Database migrations
 
-Prisma migrations still run from a local machine — Workers doesn't run
-migrations itself. The database is the same Neon Postgres instance; only
-the compute layer moved to Cloudflare. Run, pointed at the prod
-`DATABASE_URL`:
+Migrations still run from a local machine — Workers doesn't run migrations
+itself. The database is the same Neon Postgres instance; only the compute
+layer moved to Cloudflare. Run, pointed at the prod `DATABASE_URL`:
 
 ```bash
 npm run migrate:deploy

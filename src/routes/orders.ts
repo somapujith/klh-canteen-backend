@@ -12,8 +12,10 @@ import {
 import { emitOrderCreated, emitOrderStatusChanged, emitStockChanged } from "../services/sseService.js";
 import { notifyStudentOrderTelegram } from "../services/telegramService.js";
 import { toOrderSummary } from "../lib/orderSummary.js";
-import { getBindings, getRequestPrisma } from "../lib/context.js";
+import { getBindings, getRequestPool } from "../lib/context.js";
 import { rateLimit } from "../middleware/rateLimit.js";
+import { sql, query } from "../db/sql.js";
+import type { Kitchen } from "../db/schema.js";
 import type { AppEnv } from "../types.js";
 
 // notifyStudentOrderTelegram: student-only order logs after create/cancel.
@@ -60,9 +62,9 @@ const orderLimiter = rateLimit({
 
 ordersRouter.post("/", requireAuth("STUDENT"), orderLimiter, async (c) => {
   const { items, collectionAt } = createOrderSchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const orders = await createOrder(prisma, {
+  const orders = await createOrder(pool, {
     owner: { studentId: user.id },
     items,
     collectionAt: collectionAt ? new Date(collectionAt) : null,
@@ -74,11 +76,11 @@ ordersRouter.post("/", requireAuth("STUDENT"), orderLimiter, async (c) => {
   // Stock is reserved at order time now, so sellable quantity really does drop
   // here — push the absolute level so every open menu patches itself instead of
   // showing portions that are already spoken for.
-  await emitStockForOrders(prisma, bindings, orders);
+  await emitStockForOrders(pool, bindings, orders);
   // Student-only Telegram order logs (no-op for unlinked students / missing token).
   await Promise.all(
     orders.map((order) =>
-      notifyStudentOrderTelegram(prisma, bindings, {
+      notifyStudentOrderTelegram(pool, bindings, {
         studentId: order.studentId,
         orderNumber: order.orderNumber,
         status: order.status,
@@ -96,9 +98,9 @@ ordersRouter.post("/", requireAuth("STUDENT"), orderLimiter, async (c) => {
 });
 
 ordersRouter.get("/my", requireAuth("STUDENT"), async (c) => {
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const orders = await getStudentOrders(prisma, user.id);
+  const orders = await getStudentOrders(pool, user.id);
   return c.json(orders.map(serializeOrder));
 });
 
@@ -119,18 +121,18 @@ ordersRouter.get("/collection-windows", requireAuth("STUDENT"), async (c) => {
     from: c.req.query("from"),
     to: c.req.query("to"),
   });
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const fromDate = from ? new Date(from) : new Date();
   const toDate = to ? new Date(to) : new Date(Date.now() + MAX_PREBOOK_DAYS * 24 * 60 * 60 * 1000);
-  const windows = await getCollectionWindows(prisma, kitchen, fromDate, toDate);
+  const windows = await getCollectionWindows(pool, kitchen, fromDate, toDate);
   return c.json(windows);
 });
 
 ordersRouter.get("/:id", requireAuth("STUDENT"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const order = await getOrderForStudent(prisma, id, user.id);
+  const order = await getOrderForStudent(pool, id, user.id);
   return c.json(serializeOrder(order));
 });
 
@@ -141,9 +143,9 @@ ordersRouter.get("/:id", requireAuth("STUDENT"), async (c) => {
  */
 ordersRouter.post("/:id/cancel", requireAuth("STUDENT"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const order = await cancelOrder(prisma, id, { studentId: user.id });
+  const order = await cancelOrder(pool, id, { studentId: user.id });
 
   await emitOrderStatusChanged(getBindings(c), {
     orderId: order.id,
@@ -152,7 +154,7 @@ ordersRouter.post("/:id/cancel", requireAuth("STUDENT"), async (c) => {
     orderNumber: order.orderNumber,
     subjectId: order.studentId,
   });
-  await notifyStudentOrderTelegram(prisma, getBindings(c), {
+  await notifyStudentOrderTelegram(pool, getBindings(c), {
     studentId: order.studentId,
     orderNumber: order.orderNumber,
     status: order.status,
@@ -172,25 +174,37 @@ ordersRouter.post("/:id/cancel", requireAuth("STUDENT"), async (c) => {
  * Absolute values, never diffs, so a duplicated delta cannot corrupt a client.
  */
 export async function emitStockForOrders(
-  prisma: ReturnType<typeof getRequestPrisma>,
+  pool: ReturnType<typeof getRequestPool>,
   bindings: ReturnType<typeof getBindings>,
   orders: { kitchen: string; items: { menuItemId: string }[] }[]
 ) {
   const ids = [...new Set(orders.flatMap((o) => o.items.map((i) => i.menuItemId)))];
   if (ids.length === 0) return;
 
-  const items = await prisma.menuItem.findMany({
-    where: { id: { in: ids } },
-    select: { id: true, stockQty: true, reservedQty: true, isAvailable: true, category: { select: { kitchen: true } } },
-  });
+  const { rows: items } = await query<{
+    id: string;
+    stockQty: number;
+    reservedQty: number;
+    isAvailable: boolean;
+    kitchen: Kitchen;
+  }>(
+    pool,
+    sql`
+    SELECT mi."id" AS "id", mi."stockQty" AS "stockQty", mi."reservedQty" AS "reservedQty",
+           mi."isAvailable" AS "isAvailable", c."kitchen" AS "kitchen"
+      FROM "MenuItem" mi
+      JOIN "Category" c ON c."id" = mi."categoryId"
+     WHERE mi."id" = ANY(${ids}::text[])
+  `,
+  );
 
   await emitStockChanged(
     bindings,
-    items.map((i) => ({
+    items.map((i: { id: string; stockQty: number; reservedQty: number; isAvailable: boolean; kitchen: Kitchen }) => ({
       menuItemId: i.id,
       stockQty: Math.max(0, i.stockQty - i.reservedQty),
       isAvailable: i.isAvailable && i.stockQty - i.reservedQty > 0,
-      kitchen: i.category.kitchen,
+      kitchen: i.kitchen,
     }))
   );
 }

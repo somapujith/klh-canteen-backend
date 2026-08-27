@@ -5,11 +5,17 @@
  * directly; @hono/node-server adapts it onto a real http.Server. We resolve on
  * the "listening" callback because serve() returns before the socket is bound.
  */
+import crypto from "node:crypto";
 import { serve, type ServerType } from "@hono/node-server";
 import bcrypt from "bcryptjs";
 import { createApp } from "../../src/app.js";
 import { signToken } from "../../src/lib/jwt.js";
-import { getTestPrisma } from "./db.js";
+import { sql, query } from "../../src/db/sql.js";
+import * as userRepo from "../../src/db/userRepo.js";
+import * as categoryRepo from "../../src/db/categoryRepo.js";
+import * as menuItemRepo from "../../src/db/menuItemRepo.js";
+import type { Order, OrderItem } from "../../src/db/schema.js";
+import { getTestPool } from "./db.js";
 
 export function startTestServer(): Promise<ServerType> {
   const app = createApp();
@@ -34,14 +40,13 @@ export async function createStudent(
   overrides: Partial<{ name: string; rollNumber: string; email: string; password: string }> = {},
 ) {
   const password = overrides.password ?? TEST_PASSWORD;
-  const student = await getTestPrisma().user.create({
-    data: {
-      role: "STUDENT",
-      name: overrides.name ?? "Test Student",
-      rollNumber: overrides.rollNumber ?? uid("R"),
-      email: overrides.email ?? `${uid("student")}@klh.edu.in`,
-      passwordHash: await bcrypt.hash(password, 4),
-    },
+  const student = await userRepo.insert(getTestPool(), {
+    role: "STUDENT",
+    name: overrides.name ?? "Test Student",
+    rollNumber: overrides.rollNumber ?? uid("R"),
+    email: overrides.email ?? `${uid("student")}@klh.edu.in`,
+    passwordHash: await bcrypt.hash(password, 4),
+    school: "KLH",
   });
   return { ...student, password };
 }
@@ -50,14 +55,13 @@ export async function createAdmin(
   overrides: Partial<{ name: string; email: string; password: string; kitchen: "SNACKS" | "MEALS" }> = {},
 ) {
   const password = overrides.password ?? TEST_PASSWORD;
-  const admin = await getTestPrisma().user.create({
-    data: {
-      role: "ADMIN",
-      name: overrides.name ?? "Test Admin",
-      email: overrides.email ?? `${uid("admin")}@klh.edu.in`,
-      passwordHash: await bcrypt.hash(password, 4),
-      ...(overrides.kitchen ? { kitchen: overrides.kitchen } : {}),
-    },
+  const admin = await userRepo.insert(getTestPool(), {
+    role: "ADMIN",
+    name: overrides.name ?? "Test Admin",
+    email: overrides.email ?? `${uid("admin")}@klh.edu.in`,
+    passwordHash: await bcrypt.hash(password, 4),
+    kitchen: overrides.kitchen ?? null,
+    school: "KLH",
   });
   return { ...admin, password };
 }
@@ -72,18 +76,18 @@ export function tokenFor(user: { id: string; role: string; kitchen?: string | nu
 export async function createMenuItem(
   options: Partial<{ price: string; stockQty: number; kitchen: "SNACKS" | "MEALS"; name: string }> = {},
 ) {
-  const prisma = getTestPrisma();
-  const category = await prisma.category.create({
-    data: { name: uid("Category"), sortOrder: 1, kitchen: options.kitchen ?? "SNACKS" },
+  const pool = getTestPool();
+  const category = await categoryRepo.insertCategory(pool, {
+    name: uid("Category"),
+    sortOrder: 1,
+    kitchen: options.kitchen ?? "SNACKS",
   });
-  return prisma.menuItem.create({
-    data: {
-      name: options.name ?? "Samosa",
-      imageUrl: "https://example.com/samosa.jpg",
-      price: options.price ?? "20.00",
-      stockQty: options.stockQty ?? 100,
-      categoryId: category.id,
-    },
+  return menuItemRepo.insertMenuItem(pool, {
+    name: options.name ?? "Samosa",
+    imageUrl: "https://example.com/samosa.jpg",
+    price: options.price ?? "20.00",
+    stockQty: options.stockQty ?? 100,
+    categoryId: category.id,
   });
 }
 
@@ -97,6 +101,10 @@ export async function createMenuItem(
  * of them look like a pagination bug.
  *
  * Tests whose subject IS order creation go through the HTTP API instead.
+ *
+ * A plain two-statement insert (Order, then its one OrderItem) rather than
+ * orderService.ts's batch-insert machinery — a fixture only ever writes one
+ * row at a time, so the single-row shape is simpler and clearer here.
  */
 export async function seedOrder(options: {
   studentId?: string | null;
@@ -111,23 +119,41 @@ export async function seedOrder(options: {
   createdAt?: Date;
   collectionAt?: Date | null;
 }) {
+  const pool = getTestPool();
   const qty = options.qty ?? 1;
   const price = options.price ?? "20.00";
-  return getTestPrisma().order.create({
-    data: {
-      studentId: options.studentId ?? null,
-      guestSessionId: options.guestSessionId ?? null,
-      guestName: options.guestName ?? null,
-      guestPhone: options.guestPhone ?? null,
-      status: options.status ?? "PENDING",
-      kitchen: options.kitchen ?? "SNACKS",
-      token: uid("order-token"),
-      orderNumber: 1000 + (unique % 8000),
-      totalAmount: (Number(price) * qty).toFixed(2),
-      ...(options.createdAt ? { createdAt: options.createdAt } : {}),
-      collectionAt: options.collectionAt ?? null,
-      items: { create: [{ menuItemId: options.menuItemId, quantity: qty, priceAtOrder: price }] },
-    },
-    include: { items: true },
-  });
+  const orderId = crypto.randomUUID();
+  const itemId = crypto.randomUUID();
+
+  const { rows: orderRows } = await query<Order>(
+    pool,
+    sql`
+      INSERT INTO "Order" (
+        "id", "studentId", "guestSessionId", "guestName", "guestPhone",
+        "status", "kitchen", "token", "orderNumber", "totalAmount",
+        "createdAt", "collectionAt"
+      )
+      VALUES (
+        ${orderId}, ${options.studentId ?? null}, ${options.guestSessionId ?? null},
+        ${options.guestName ?? null}, ${options.guestPhone ?? null},
+        ${(options.status ?? "PENDING")}::"OrderStatus", ${(options.kitchen ?? "SNACKS")}::"Kitchen",
+        ${uid("order-token")}, ${1000 + (unique % 8000)}, ${(Number(price) * qty).toFixed(2)},
+        ${options.createdAt ? options.createdAt.toISOString() : new Date().toISOString()}::timestamp,
+        ${options.collectionAt ? options.collectionAt.toISOString() : null}::timestamp
+      )
+      RETURNING *
+    `,
+  );
+  const order = orderRows[0];
+
+  const { rows: itemRows } = await query<OrderItem>(
+    pool,
+    sql`
+      INSERT INTO "OrderItem" ("id", "orderId", "menuItemId", "quantity", "priceAtOrder")
+      VALUES (${itemId}, ${orderId}, ${options.menuItemId}, ${qty}, ${price})
+      RETURNING *
+    `,
+  );
+
+  return { ...order, items: itemRows };
 }

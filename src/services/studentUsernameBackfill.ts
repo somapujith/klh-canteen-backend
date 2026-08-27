@@ -3,8 +3,8 @@
  * usernames so `User.email` holds the bare roll number.
  *
  * The CLI that drives it is scripts/backfillStudentUsernames.ts. The logic
- * lives here, taking an injected PrismaClient, so the suite can run it against
- * the disposable test database instead of it only ever being exercised for the
+ * lives here, taking an injected Pool, so the suite can run it against the
+ * disposable test database instead of it only ever being exercised for the
  * first time against the live one.
  *
  * WHAT IT TOUCHES, AND WHAT IT REFUSES TO
@@ -50,7 +50,7 @@
  * usernames both authenticate, so rolling the CODE back is sufficient to undo
  * a bad deploy.
  */
-import type { PrismaClient } from "@prisma/client";
+import type { Pool } from "@neondatabase/serverless";
 
 export const LEGACY_DOMAIN = "klh.edu.in";
 
@@ -61,7 +61,7 @@ export const LEGACY_DOMAIN = "klh.edu.in";
  * report a count the write does not honour.
  */
 const CONVERTIBLE = `
-  "role" = 'STUDENT'
+  "role" = 'STUDENT'::"Role"
   AND "rollNumber" IS NOT NULL
   AND "email" = lower("rollNumber") || '@${LEGACY_DOMAIN}'
 `;
@@ -95,10 +95,8 @@ export interface BackfillPreview {
 }
 
 /** Read-only. Reports exactly what applyStudentUsernameBackfill() would change. */
-export async function previewStudentUsernameBackfill(
-  prisma: PrismaClient,
-): Promise<BackfillPreview> {
-  const rows = await prisma.$queryRawUnsafe<BackfillRow[]>(`
+export async function previewStudentUsernameBackfill(pool: Pool): Promise<BackfillPreview> {
+  const { rows } = await pool.query<BackfillRow>(`
     SELECT "User"."id",
            "User"."name",
            "User"."rollNumber",
@@ -110,14 +108,16 @@ export async function previewStudentUsernameBackfill(
     ORDER BY "User"."rollNumber" ASC
   `);
 
-  const [totalStudents, alreadyBare] = await Promise.all([
-    prisma.user.count({ where: { role: "STUDENT" } }),
-    prisma.user.count({ where: { role: "STUDENT", NOT: { email: { contains: "@" } } } }),
+  const [{ rows: totalRows }, { rows: bareRows }] = await Promise.all([
+    pool.query<{ count: string }>(`SELECT COUNT(*)::bigint AS count FROM "User" WHERE "role" = 'STUDENT'::"Role"`),
+    pool.query<{ count: string }>(
+      `SELECT COUNT(*)::bigint AS count FROM "User" WHERE "role" = 'STUDENT'::"Role" AND "email" NOT LIKE '%@%'`,
+    ),
   ]);
 
   return {
-    totalStudents,
-    alreadyBare,
+    totalStudents: Number(totalRows[0]?.count ?? 0),
+    alreadyBare: Number(bareRows[0]?.count ?? 0),
     convertible: rows.filter((r) => !r.collides),
     blocked: rows.filter((r) => r.collides),
   };
@@ -127,11 +127,12 @@ export async function previewStudentUsernameBackfill(
  * Performs the conversion. One statement, so the whole set moves or none of
  * it does. Returns the number of rows actually updated.
  */
-export async function applyStudentUsernameBackfill(prisma: PrismaClient): Promise<number> {
-  return prisma.$executeRawUnsafe(`
+export async function applyStudentUsernameBackfill(pool: Pool): Promise<number> {
+  const result = await pool.query(`
     UPDATE "User"
     SET "email" = lower("User"."rollNumber")
     WHERE ${CONVERTIBLE}
       AND ${NO_COLLISION}
   `);
+  return result.rowCount ?? 0;
 }

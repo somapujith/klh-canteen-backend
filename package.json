@@ -4,7 +4,6 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "postinstall": "prisma generate",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "start:node": "tsx src/server.node.ts",
@@ -12,10 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "seed:admin": "tsx scripts/seedAdmin.ts",
-    "migrate:deploy": "prisma migrate deploy",
-    "test:db:up": "docker compose -f docker-compose.test.yml up -d --wait && npm run test:db:migrate",
-    "test:db:down": "docker compose -f docker-compose.test.yml down -v",
-    "test:db:reset": "npm run test:db:down && npm run test:db:up",
+    "migrate:deploy": "tsx scripts/migrate.ts",
     "test:db:migrate": "tsx tests/setup/migrateTestDatabase.ts",
     "typecheck:tests": "tsc -p tsconfig.test.json --noEmit"
   },
@@ -25,8 +21,6 @@
   "type": "module",
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
-    "@prisma/adapter-neon": "^7.9.1",
-    "@prisma/client": "^7.8.0",
     "bcryptjs": "^3.0.3",
     "csv-parse": "^7.0.1",
     "dotenv": "^17.4.2",
@@ -40,7 +34,6 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^26.1.1",
     "@types/supertest": "^7.2.0",
-    "prisma": "^7.8.0",
     "supertest": "^7.2.2",
     "tsx": "^4.23.0",
     "typescript": "^5.9.3",

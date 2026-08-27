@@ -9,7 +9,7 @@ import {
   MAX_EXPORT_WINDOW_DAYS,
 } from "../services/orderExportService.js";
 import { logAction } from "../services/auditService.js";
-import { getRequestPrisma } from "../lib/context.js";
+import { getRequestPool } from "../lib/context.js";
 import { ApiError } from "../middleware/errorHandler.js";
 import type { AppEnv } from "../types.js";
 
@@ -64,15 +64,15 @@ superAdminExportsRouter.get("/orders.csv", async (c) => {
     to: query.to ? new Date(query.to) : undefined,
   });
 
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const actor = c.get("user")!;
 
   // Counted and logged BEFORE the stream starts. Once the response headers are
   // written the handler has already returned, and on Workers any work started
   // after that needs waitUntil to survive — an audit entry for a data export
   // is not something to leave to chance.
-  const rowCount = await countExportRows(prisma, window, options);
-  await logAction(prisma, actor.id, "ORDER_EXPORT", "Order", undefined, {
+  const rowCount = await countExportRows(pool, window, options);
+  await logAction(pool, actor.id, "ORDER_EXPORT", "Order", undefined, {
     from: window.from.toISOString(),
     to: window.to.toISOString(),
     kitchen: query.kitchen ?? null,
@@ -82,7 +82,7 @@ superAdminExportsRouter.get("/orders.csv", async (c) => {
 
   const filename = `orders_${exportDateStamp(window.from)}_to_${exportDateStamp(window.to)}.csv`;
 
-  return new Response(streamOrdersCsv(prisma, window, options), {
+  return new Response(streamOrdersCsv(pool, window, options), {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": `attachment; filename="${filename}"`,

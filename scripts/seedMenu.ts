@@ -1,7 +1,10 @@
 import "dotenv/config";
-import { getPrisma } from "../src/lib/prisma.js";
+import { getPool } from "../src/lib/db.js";
+import { sql, query } from "../src/db/sql.js";
+import { insertMenuItem } from "../src/db/menuItemRepo.js";
+import type { Category } from "../src/db/schema.js";
 
-const prisma = getPrisma(process.env.DATABASE_URL!);
+const pool = getPool(process.env.DATABASE_URL!);
 
 async function main() {
   console.log("Seeding menu categories and items...");
@@ -18,12 +21,20 @@ async function main() {
   const categoryMap: Record<string, string> = {};
 
   for (const cat of categories) {
-    const created = await prisma.category.upsert({
-      where: { name: cat.name },
-      update: {},
-      create: cat,
-    });
-    categoryMap[cat.name] = created.id;
+    // Category.name is UNIQUE — upsert on that key, mirroring
+    // prisma.category.upsert({ where: { name }, update: {}, create: cat }).
+    // "kitchen" defaults to "SNACKS" in the DB (see migration), matching the
+    // implicit default the old Prisma create relied on.
+    const { rows } = await query<Category>(
+      pool,
+      sql`
+        INSERT INTO "Category" ("id", "name", "sortOrder")
+        VALUES (gen_random_uuid(), ${cat.name}, ${cat.sortOrder})
+        ON CONFLICT ("name") DO UPDATE SET "name" = EXCLUDED."name"
+        RETURNING "id", "name", "sortOrder", "kitchen"
+      `
+    );
+    categoryMap[cat.name] = rows[0].id;
   }
 
   const items = [
@@ -68,16 +79,25 @@ async function main() {
   ];
 
   for (const item of items) {
-    const existing = await prisma.menuItem.findFirst({ where: { name: item.name } });
-    if (!existing) {
-      await prisma.menuItem.create({
-        data: item,
+    // No unique constraint on MenuItem.name — replicate the original
+    // find-then-create (skip if a row with this name already exists).
+    const { rows: existing } = await query(
+      pool,
+      sql`SELECT "id" FROM "MenuItem" WHERE "name" = ${item.name} LIMIT 1`
+    );
+    if (existing.length === 0) {
+      await insertMenuItem(pool, {
+        name: item.name,
+        imageUrl: item.imageUrl,
+        price: item.price.toFixed(2),
+        stockQty: item.stockQty,
+        categoryId: item.categoryId,
       });
     }
   }
 
   console.log(`Seeded ${categories.length} categories and ${items.length} menu items.`);
-  await prisma.$disconnect();
+  await pool.end();
 }
 
 main().catch((e) => {

@@ -1,8 +1,11 @@
 import "dotenv/config";
 import bcrypt from "bcryptjs";
-import { getPrisma } from "../src/lib/prisma.js";
+import crypto from "node:crypto";
+import { getPool } from "../src/lib/db.js";
+import { sql, query } from "../src/db/sql.js";
+import type { User } from "../src/db/schema.js";
 
-const prisma = getPrisma(process.env.DATABASE_URL!);
+const pool = getPool(process.env.DATABASE_URL!);
 
 /**
  * FORCED PASSWORD CHANGE AND THE ACCOUNTS THAT ARE EXEMPT FROM IT
@@ -57,67 +60,67 @@ async function main() {
   const studentPasswordHash = await bcrypt.hash(studentPassword, 12);
 
   // Snacks Admin
-  await prisma.user.upsert({
-    where: { email: "snacks_admin@klh.edu.in" },
-    update: { passwordHash, name: "Snacks Admin", kitchen: "SNACKS", mustChangePassword: false, isActive: true },
-    create: {
-      email: "snacks_admin@klh.edu.in",
-      passwordHash,
-      name: "Snacks Admin",
-      role: "ADMIN",
-      kitchen: "SNACKS",
-      mustChangePassword: false,
-    },
-  });
+  await query<User>(
+    pool,
+    sql`
+      INSERT INTO "User" ("id", "email", "passwordHash", "name", "role", "kitchen", "mustChangePassword")
+      VALUES (${crypto.randomUUID()}, 'snacks_admin@klh.edu.in', ${passwordHash}, 'Snacks Admin', 'ADMIN'::"Role", 'SNACKS'::"Kitchen", false)
+      ON CONFLICT ("email") DO UPDATE SET
+        "passwordHash" = EXCLUDED."passwordHash",
+        "name" = EXCLUDED."name",
+        "kitchen" = EXCLUDED."kitchen",
+        "mustChangePassword" = EXCLUDED."mustChangePassword",
+        "isActive" = true
+      RETURNING *
+    `,
+  );
 
   // Meals Admin
-  await prisma.user.upsert({
-    where: { email: "meals_admin@klh.edu.in" },
-    update: { passwordHash, name: "Meals Admin", kitchen: "MEALS", mustChangePassword: false, isActive: true },
-    create: {
-      email: "meals_admin@klh.edu.in",
-      passwordHash,
-      name: "Meals Admin",
-      role: "ADMIN",
-      kitchen: "MEALS",
-      mustChangePassword: false,
-    },
-  });
+  await query<User>(
+    pool,
+    sql`
+      INSERT INTO "User" ("id", "email", "passwordHash", "name", "role", "kitchen", "mustChangePassword")
+      VALUES (${crypto.randomUUID()}, 'meals_admin@klh.edu.in', ${passwordHash}, 'Meals Admin', 'ADMIN'::"Role", 'MEALS'::"Kitchen", false)
+      ON CONFLICT ("email") DO UPDATE SET
+        "passwordHash" = EXCLUDED."passwordHash",
+        "name" = EXCLUDED."name",
+        "kitchen" = EXCLUDED."kitchen",
+        "mustChangePassword" = EXCLUDED."mustChangePassword",
+        "isActive" = true
+      RETURNING *
+    `,
+  );
 
   // Super Admin
-  await prisma.user.upsert({
-    where: { email: "superadmin@klh.edu.in" },
-    update: { passwordHash, name: "Super Admin", mustChangePassword: false, isActive: true },
-    create: {
-      email: "superadmin@klh.edu.in",
-      passwordHash,
-      name: "Super Admin",
-      role: "SUPERADMIN",
-      mustChangePassword: false,
-    },
-  });
+  await query<User>(
+    pool,
+    sql`
+      INSERT INTO "User" ("id", "email", "passwordHash", "name", "role", "mustChangePassword")
+      VALUES (${crypto.randomUUID()}, 'superadmin@klh.edu.in', ${passwordHash}, 'Super Admin', 'SUPERADMIN'::"Role", false)
+      ON CONFLICT ("email") DO UPDATE SET
+        "passwordHash" = EXCLUDED."passwordHash",
+        "name" = EXCLUDED."name",
+        "mustChangePassword" = EXCLUDED."mustChangePassword",
+        "isActive" = true
+      RETURNING *
+    `,
+  );
 
   // Demo Student (matches the "Student Account" quick-fill on the login page)
-  await prisma.user.upsert({
-    where: { email: studentEmail },
-    // The demo student is exempt too: a live demo is being recorded against
-    // this login and must not hit a change-password wall mid-take.
-    update: {
-      passwordHash: studentPasswordHash,
-      name: "Demo Student",
-      rollNumber: studentRollNumber,
-      mustChangePassword: false,
-      isActive: true,
-    },
-    create: {
-      email: studentEmail,
-      passwordHash: studentPasswordHash,
-      name: "Demo Student",
-      role: "STUDENT",
-      rollNumber: studentRollNumber,
-      mustChangePassword: false,
-    },
-  });
+  await query<User>(
+    pool,
+    sql`
+      INSERT INTO "User" ("id", "email", "passwordHash", "name", "role", "rollNumber", "mustChangePassword")
+      VALUES (${crypto.randomUUID()}, ${studentEmail}, ${studentPasswordHash}, 'Demo Student', 'STUDENT'::"Role", ${studentRollNumber}, false)
+      ON CONFLICT ("email") DO UPDATE SET
+        "passwordHash" = EXCLUDED."passwordHash",
+        "name" = EXCLUDED."name",
+        "rollNumber" = EXCLUDED."rollNumber",
+        "mustChangePassword" = EXCLUDED."mustChangePassword",
+        "isActive" = true
+      RETURNING *
+    `,
+  );
 
   console.log(`Student seeded: ${studentEmail} (roll ${studentRollNumber})`);
   console.log("Admins seeded: snacks_admin@klh.edu.in & meals_admin@klh.edu.in & superadmin@klh.edu.in");
@@ -125,7 +128,7 @@ async function main() {
 
   await flagExistingStudentsIfRequested(studentEmail);
 
-  await prisma.$disconnect();
+  await pool.end();
 }
 
 /**
@@ -144,16 +147,16 @@ async function flagExistingStudentsIfRequested(demoStudentEmail: string) {
   }
 
   const exempt = [...EXEMPT_EMAILS, demoStudentEmail];
-  const { count } = await prisma.user.updateMany({
-    where: { role: "STUDENT", mustChangePassword: false, email: { notIn: exempt } },
-    data: {
-      mustChangePassword: true,
-      // Their current sessions were opened on the shared password, so they go
-      // too — otherwise a live token keeps ordering right past the new flag.
-      tokensValidFrom: new Date(Math.floor(Date.now() / 1000) * 1000 + 1000),
-    },
-  });
-  console.log(`Flagged ${count} existing student account(s) for a forced password change.`);
+  const tokensValidFrom = new Date(Math.floor(Date.now() / 1000) * 1000 + 1000);
+  const { rowCount } = await query(
+    pool,
+    sql`
+      UPDATE "User"
+      SET "mustChangePassword" = true, "tokensValidFrom" = ${tokensValidFrom}
+      WHERE "role" = 'STUDENT'::"Role" AND "mustChangePassword" = false AND "email" <> ALL(${exempt}::text[])
+    `,
+  );
+  console.log(`Flagged ${rowCount} existing student account(s) for a forced password change.`);
 }
 
 main();

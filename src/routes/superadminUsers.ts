@@ -14,7 +14,7 @@ import {
   MAX_BULK_USER_IDS,
 } from "../services/userAdminService.js";
 import { logAction } from "../services/auditService.js";
-import { getRequestPrisma } from "../lib/context.js";
+import { getRequestPool } from "../lib/context.js";
 import type { AppEnv } from "../types.js";
 
 export const superAdminUsersRouter = new Hono<AppEnv>();
@@ -23,6 +23,7 @@ superAdminUsersRouter.use("*", requireAuth("SUPERADMIN"));
 
 const kitchenEnum = z.enum(["SNACKS", "MEALS"]);
 const roleEnum = z.enum(["STUDENT", "ADMIN", "SUPERADMIN"]);
+const schoolEnum = z.enum(["KLH", "DRK"]);
 const idSchema = z.string().uuid();
 
 /**
@@ -44,6 +45,7 @@ const createUserSchema = z
     password: z.string().min(8),
     rollNumber: z.string().min(1).optional(),
     kitchen: kitchenEnum.optional(),
+    school: schoolEnum,
   })
   .superRefine((v, ctx) => {
     if (v.role === "STUDENT") {
@@ -67,6 +69,7 @@ const updateUserSchema = z.object({
   role: roleEnum.optional(),
   kitchen: kitchenEnum.nullable().optional(),
   password: z.string().min(8).optional(),
+  school: schoolEnum.optional(),
 });
 
 const listQuerySchema = z.object({
@@ -140,14 +143,14 @@ superAdminUsersRouter.get("/", async (c) => {
     search: query.search,
   };
 
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const [page, total] = await Promise.all([
-    listUsers(prisma, {
+    listUsers(pool, {
       ...options,
       cursor: query.cursor,
       limit: query.limit ?? DEFAULT_USER_PAGE_SIZE,
     }),
-    countUsers(prisma, options),
+    countUsers(pool, options),
   ]);
 
   c.header("X-Next-Cursor", page.nextCursor ?? "");
@@ -165,15 +168,15 @@ superAdminUsersRouter.get("/", async (c) => {
 
 superAdminUsersRouter.post("/", async (c) => {
   const data = createUserSchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const actor = c.get("user")!;
-  const user = await createUser(prisma, {
+  const user = await createUser(pool, {
     ...data,
     // Guaranteed non-undefined by createUserSchema: a STUDENT without an email
     // has a rollNumber, and every other role has an email.
     email: data.email ?? usernameForRollNumber(data.rollNumber!),
   });
-  await logAction(prisma, actor.id, "USER_CREATE", "User", user.id, { role: user.role, email: user.email });
+  await logAction(pool, actor.id, "USER_CREATE", "User", user.id, { role: user.role, email: user.email, school: user.school });
   return c.json(user, 201);
 });
 
@@ -192,10 +195,10 @@ superAdminUsersRouter.post("/", async (c) => {
  */
 superAdminUsersRouter.post("/bulk/deactivate", async (c) => {
   const { userIds } = bulkSchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const actor = c.get("user")!;
-  const result = await setUsersActive(prisma, userIds, false, actor.id);
-  await logAction(prisma, actor.id, "USER_BULK_DEACTIVATE", "User", undefined, {
+  const result = await setUsersActive(pool, userIds, false, actor.id);
+  await logAction(pool, actor.id, "USER_BULK_DEACTIVATE", "User", undefined, {
     requested: result.requested,
     changed: result.changed,
     tokensValidFrom: result.tokensValidFrom,
@@ -207,10 +210,10 @@ superAdminUsersRouter.post("/bulk/deactivate", async (c) => {
 
 superAdminUsersRouter.post("/bulk/reactivate", async (c) => {
   const { userIds } = bulkSchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const actor = c.get("user")!;
-  const result = await setUsersActive(prisma, userIds, true, actor.id);
-  await logAction(prisma, actor.id, "USER_BULK_REACTIVATE", "User", undefined, {
+  const result = await setUsersActive(pool, userIds, true, actor.id);
+  await logAction(pool, actor.id, "USER_BULK_REACTIVATE", "User", undefined, {
     requested: result.requested,
     changed: result.changed,
     userIds: result.changedUsers.map((u) => u.id),
@@ -222,10 +225,10 @@ superAdminUsersRouter.post("/bulk/reactivate", async (c) => {
 superAdminUsersRouter.post("/:id/deactivate", async (c) => {
   const id = idSchema.parse(c.req.param("id"));
   const { force } = await readSingleBody(c);
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const actor = c.get("user")!;
-  const result = await setUsersActive(prisma, [id], false, actor.id, { allowProtected: force });
-  await logAction(prisma, actor.id, "USER_DEACTIVATE", "User", id, {
+  const result = await setUsersActive(pool, [id], false, actor.id, { allowProtected: force });
+  await logAction(pool, actor.id, "USER_DEACTIVATE", "User", id, {
     changed: result.changed,
     forced: force,
     tokensValidFrom: result.tokensValidFrom,
@@ -236,12 +239,12 @@ superAdminUsersRouter.post("/:id/deactivate", async (c) => {
 
 superAdminUsersRouter.post("/:id/reactivate", async (c) => {
   const id = idSchema.parse(c.req.param("id"));
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const actor = c.get("user")!;
   // Reactivation restores access; the protected list exists to stop accounts
   // being taken away, so it has nothing to say here.
-  const result = await setUsersActive(prisma, [id], true, actor.id, { allowProtected: true });
-  await logAction(prisma, actor.id, "USER_REACTIVATE", "User", id, {
+  const result = await setUsersActive(pool, [id], true, actor.id, { allowProtected: true });
+  await logAction(pool, actor.id, "USER_REACTIVATE", "User", id, {
     changed: result.changed,
     skipped: result.skipped,
   });
@@ -251,18 +254,18 @@ superAdminUsersRouter.post("/:id/reactivate", async (c) => {
 superAdminUsersRouter.patch("/:id", async (c) => {
   const id = idSchema.parse(c.req.param("id"));
   const data = updateUserSchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const actor = c.get("user")!;
-  const user = await updateUser(prisma, id, data);
-  await logAction(prisma, actor.id, "USER_UPDATE", "User", id, { fields: Object.keys(data) });
+  const user = await updateUser(pool, id, data);
+  await logAction(pool, actor.id, "USER_UPDATE", "User", id, { fields: Object.keys(data) });
   return c.json(user);
 });
 
 superAdminUsersRouter.delete("/:id", async (c) => {
   const id = idSchema.parse(c.req.param("id"));
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const actor = c.get("user")!;
-  await deleteUser(prisma, id, actor.id);
-  await logAction(prisma, actor.id, "USER_DELETE", "User", id);
+  await deleteUser(pool, id, actor.id);
+  await logAction(pool, actor.id, "USER_DELETE", "User", id);
   return c.body(null, 204);
 });

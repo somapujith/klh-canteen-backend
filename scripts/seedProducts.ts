@@ -1,7 +1,10 @@
 import "dotenv/config";
-import { getPrisma } from "../src/lib/prisma.js";
+import { getPool } from "../src/lib/db.js";
+import { sql, query } from "../src/db/sql.js";
+import { insertMenuItem } from "../src/db/menuItemRepo.js";
+import type { Category } from "../src/db/schema.js";
 
-const prisma = getPrisma(process.env.DATABASE_URL!);
+const pool = getPool(process.env.DATABASE_URL!);
 
 const categories = [
   { name: "Beverages", sortOrder: 1 },
@@ -30,7 +33,7 @@ const products = [
   { name: "Vada Pav", cat: "Snacks", price: "20.00", kw: "vadapav" },
   { name: "Onion Pakoda", cat: "Snacks", price: "30.00", kw: "pakoda" },
   { name: "Cheese Nachos", cat: "Snacks", price: "70.00", kw: "nachos" },
-  
+
   // Meals
   { name: "Veg Thali", cat: "Meals", price: "80.00", kw: "thali" },
   { name: "Chicken Biryani", cat: "Meals", price: "150.00", kw: "biryani" },
@@ -52,45 +55,53 @@ const products = [
 
 async function main() {
   console.log("Seeding categories...");
-  const catMap = new Map();
-  
+  const catMap = new Map<string, string>();
+
   for (const { name, sortOrder } of categories) {
-    const kitchen = (name === "Meals") ? "MEALS" : "SNACKS";
-    const created = await prisma.category.upsert({
-      where: { name },
-      update: { sortOrder, kitchen },
-      create: { name, sortOrder, kitchen },
-    });
-    catMap.set(created.name, created.id);
+    const kitchen = name === "Meals" ? "MEALS" : "SNACKS";
+    // Category.name is UNIQUE — upsert on that key, mirroring
+    // prisma.category.upsert({ where: { name }, update: { sortOrder, kitchen }, create: {...} }).
+    const { rows } = await query<Category>(
+      pool,
+      sql`
+        INSERT INTO "Category" ("id", "name", "sortOrder", "kitchen")
+        VALUES (gen_random_uuid(), ${name}, ${sortOrder}, ${kitchen})
+        ON CONFLICT ("name") DO UPDATE SET "sortOrder" = EXCLUDED."sortOrder", "kitchen" = EXCLUDED."kitchen"
+        RETURNING "id", "name", "sortOrder", "kitchen"
+      `
+    );
+    catMap.set(rows[0].name, rows[0].id);
   }
 
   console.log("Seeding 30 products...");
-  
+
   let i = 1;
   for (const p of products) {
-    const categoryId = catMap.get(p.cat);
+    const categoryId = catMap.get(p.cat)!;
     const stockQty = Math.floor(Math.random() * 50) + 20; // 20 to 69
     // Using loremflickr for random contextual images based on keyword
     const imageUrl = `https://loremflickr.com/400/400/${p.kw}?random=${i}`;
-    
-    const existing = await prisma.menuItem.findFirst({ where: { name: p.name } });
-    if (!existing) {
-      await prisma.menuItem.create({
-        data: {
-          name: p.name,
-          price: p.price,
-          imageUrl,
-          categoryId,
-          stockQty,
-          isAvailable: true
-        },
+
+    // No unique constraint on MenuItem.name — replicate the original
+    // find-then-create (skip if a row with this name already exists).
+    const { rows: existing } = await query(
+      pool,
+      sql`SELECT "id" FROM "MenuItem" WHERE "name" = ${p.name} LIMIT 1`
+    );
+    if (existing.length === 0) {
+      await insertMenuItem(pool, {
+        name: p.name,
+        price: p.price,
+        imageUrl,
+        categoryId,
+        stockQty,
       });
     }
     i++;
   }
-  
+
   console.log("Successfully seeded 30 products!");
-  await prisma.$disconnect();
+  await pool.end();
 }
 
 main().catch((e) => {

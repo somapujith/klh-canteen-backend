@@ -1,12 +1,15 @@
 name: CI
 
-# Runs typecheck and the full test suite against an EPHEMERAL Postgres service
-# container that is created and destroyed with the job.
+# Runs typecheck and the full test suite against a dedicated Neon branch
+# (project `KLH Canteen`, branch `test`, database `klh_canteen_test`) — never
+# against the production branch.
 #
-# There is deliberately no database secret anywhere in this workflow. The suite
-# refuses to run against anything that is not a disposable test database (see
-# tests/setup/databaseGuard.ts), so even if a production URL were added to the
-# repository secrets, CI could not point the tests at it.
+# The database URL lives in the TEST_DATABASE_URL repository secret. That
+# alone is not trusted: tests/setup/databaseGuard.ts independently refuses to
+# run against anything whose database name doesn't contain "test", whose
+# identity matches what .env/.env.production point at, or that lacks the
+# physical marker table this suite itself creates — so even a misconfigured
+# secret cannot point the tests at production. See TESTING.md.
 
 on:
   push:
@@ -22,40 +25,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
-    services:
-      # The database. Lives and dies with this job; nothing persists.
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: klh_test
-          POSTGRES_PASSWORD: klh_test
-          POSTGRES_DB: klh_canteen_test
-        ports:
-          - 55433:5432
-        options: >-
-          --health-cmd "pg_isready -U klh_test -d klh_canteen_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-
-      # The app reaches Postgres through @neondatabase/serverless, which speaks
-      # the Postgres protocol over a WebSocket rather than raw TCP. wsproxy
-      # terminates that WebSocket and forwards to the service above by its
-      # network alias. Without it the driver cannot talk to a plain Postgres.
-      wsproxy:
-        image: ghcr.io/neondatabase/wsproxy:latest
-        env:
-          APPEND_PORT: "postgres:5432"
-          ALLOW_ADDR_REGEX: ".*"
-        ports:
-          - 55480:80
-
     env:
       # Deliberately named TEST_DATABASE_URL, not DATABASE_URL: the suite never
       # reads a database URL out of the ambient environment, precisely so that
       # a stray DATABASE_URL cannot steer it.
-      TEST_DATABASE_URL: postgresql://klh_test:klh_test@localhost:55433/klh_canteen_test
-      NEON_WS_PROXY: localhost:55480
+      TEST_DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
+      # Required opt-in for any non-local DATABASE_URL — see databaseGuard.ts.
+      ALLOW_REMOTE_TEST_DATABASE: "1"
       JWT_SECRET: ci-jwt-secret-not-a-real-secret
       QR_TOKEN_SECRET: ci-qr-secret-not-a-real-secret
       CORS_ORIGIN: "*"
@@ -68,7 +44,6 @@ jobs:
           node-version: 24
           cache: npm
 
-      # `postinstall` runs `prisma generate`, so the client is built here.
       - run: npm ci
 
       - name: Typecheck (src)
@@ -87,7 +62,7 @@ jobs:
             echo "No lint script configured — skipping. Add one and wire it up here."
           fi
 
-      # globalSetup applies migrations to the service container and refuses to
+      # globalSetup applies migrations to the Neon test branch and refuses to
       # run at all if TEST_DATABASE_URL is not a disposable test database.
       - name: Test
         run: npm test

@@ -1,4 +1,6 @@
-import type { Prisma, PrismaClient } from "@prisma/client";
+import type { Pool } from "@neondatabase/serverless";
+import { sql, query } from "../db/sql.js";
+import { WhereBuilder } from "../db/where.js";
 import { ApiError } from "../middleware/errorHandler.js";
 import { withCustomer } from "./orderService.js";
 
@@ -106,23 +108,37 @@ function csvRow(values: unknown[]): string {
   return `${values.map(csvField).join(",")}\n`;
 }
 
-const EXPORT_SELECT = {
-  id: true,
-  orderNumber: true,
-  createdAt: true,
-  collectionAt: true,
-  deliveredAt: true,
-  status: true,
-  kitchen: true,
-  totalAmount: true,
-  guestName: true,
-  guestPhone: true,
-  guestSessionId: true,
-  student: { select: { id: true, name: true, rollNumber: true, email: true } },
-  items: { select: { quantity: true, menuItem: { select: { name: true } } } },
-} as const;
+/**
+ * Base `Order` columns for one export row, read directly (matches column
+ * names 1:1 — see src/db/schema.ts's doc comment). `studentId` rides along
+ * only to drive the student join in hydrateExportRows(); it never reaches
+ * ORDER_EXPORT_COLUMNS.
+ */
+interface ExportOrderRow {
+  id: string;
+  orderNumber: number;
+  createdAt: Date;
+  collectionAt: Date | null;
+  deliveredAt: Date | null;
+  status: string;
+  kitchen: string;
+  totalAmount: string;
+  guestName: string | null;
+  guestPhone: string | null;
+  guestSessionId: string | null;
+  studentId: string | null;
+}
 
-type ExportRow = Prisma.OrderGetPayload<{ select: typeof EXPORT_SELECT }>;
+/**
+ * Hand-written replacement for
+ * `Prisma.OrderGetPayload<{ select: typeof EXPORT_SELECT }>` — the 3-level
+ * nested Prisma select (Order -> items -> menuItem, Order -> student) this
+ * export used to declare.
+ */
+export interface ExportRow extends ExportOrderRow {
+  student: { id: string; name: string; rollNumber: string | null; email: string } | null;
+  items: { quantity: number; menuItem: { name: string } }[];
+}
 
 function toCsvLine(order: ExportRow): string {
   // Same STUDENT/GUEST resolution the admin board uses, so a name in the
@@ -154,33 +170,108 @@ function buildExportWhere(
   window: ResolvedExportWindow,
   options: OrderExportOptions,
   cursor: { createdAt: Date; id: string } | null,
-): Prisma.OrderWhereInput {
-  const and: Prisma.OrderWhereInput[] = [
-    { createdAt: { gte: window.from, lte: window.to } },
-  ];
-  if (options.kitchen) and.push({ kitchen: options.kitchen as any });
-  if (options.statuses?.length) and.push({ status: { in: options.statuses as any } });
+) {
+  const where = new WhereBuilder();
+  // Bounds are ISO-UTC strings cast to `::timestamp`, not raw Date params: a
+  // bare Date object handed to the driver as a parameter for a `timestamp
+  // without time zone` column is serialized using the process's *local*
+  // wall-clock time, not UTC, silently shifting the comparison by the host's
+  // UTC offset. Casting an ISO string sidesteps that.
+  where.and(`"createdAt" >= $1::timestamp AND "createdAt" <= $2::timestamp`, window.from.toISOString(), window.to.toISOString());
+  if (options.kitchen) where.and(`"kitchen" = $1::"Kitchen"`, options.kitchen);
+  if (options.statuses?.length) where.and(`"status"::text = ANY($1::text[])`, options.statuses);
   if (cursor) {
     // Strictly "after" the cursor row in (createdAt ASC, id ASC) order. The
     // export reads oldest-first because a ledger is read in the order the
     // money came in.
-    and.push({
-      OR: [
-        { createdAt: { gt: cursor.createdAt } },
-        { AND: [{ createdAt: cursor.createdAt }, { id: { gt: cursor.id } }] },
-      ],
-    });
+    where.and(
+      `("createdAt" > $1::timestamp OR ("createdAt" = $1::timestamp AND "id" > $2))`,
+      cursor.createdAt.toISOString(),
+      cursor.id,
+    );
   }
-  return { AND: and };
+  return where.build();
 }
 
 /** Row count the export will produce — cheap enough to report in the audit log. */
 export async function countExportRows(
-  prisma: PrismaClient,
+  pool: Pool,
   window: ResolvedExportWindow,
   options: OrderExportOptions,
 ): Promise<number> {
-  return prisma.order.count({ where: buildExportWhere(window, options, null) });
+  const { rows } = await query<{ count: string }>(
+    pool,
+    sql`SELECT COUNT(*)::text AS count FROM "Order" WHERE ${buildExportWhere(window, options, null)}`,
+  );
+  return Number(rows[0]?.count ?? 0);
+}
+
+/**
+ * Joins one batch of base order rows to their items+menuItem and their
+ * student, matching orderService.ts's own hydrateOrders idiom (one query for
+ * items, one for students, joined in memory) rather than sharing that
+ * function directly — this export's row shape is narrower (only the item
+ * name/quantity and a thinner student summary are ever written to CSV).
+ */
+async function hydrateExportRows(pool: Pool, orders: ExportOrderRow[]): Promise<ExportRow[]> {
+  if (orders.length === 0) return [];
+  const orderIds = orders.map((o) => o.id);
+  const studentIds = [...new Set(orders.map((o) => o.studentId).filter((id): id is string => Boolean(id)))];
+
+  const [{ rows: itemRows }, { rows: studentRows }] = await Promise.all([
+    query<{ orderId: string; quantity: number; menuItemName: string }>(
+      pool,
+      sql`
+      SELECT oi."orderId" AS "orderId", oi."quantity" AS "quantity", mi."name" AS "menuItemName"
+        FROM "OrderItem" oi
+        JOIN "MenuItem" mi ON mi."id" = oi."menuItemId"
+       WHERE oi."orderId" = ANY(${orderIds}::text[])
+    `,
+    ),
+    studentIds.length > 0
+      ? query<{ id: string; name: string; rollNumber: string | null; email: string }>(
+          pool,
+          sql`SELECT "id", "name", "rollNumber", "email" FROM "User" WHERE "id" = ANY(${studentIds}::text[])`,
+        )
+      : Promise.resolve({
+          rows: [] as { id: string; name: string; rollNumber: string | null; email: string }[],
+          rowCount: 0,
+        }),
+  ]);
+
+  const itemsByOrder = new Map<string, { quantity: number; menuItem: { name: string } }[]>();
+  for (const row of itemRows) {
+    const bucket = itemsByOrder.get(row.orderId) ?? [];
+    bucket.push({ quantity: row.quantity, menuItem: { name: row.menuItemName } });
+    itemsByOrder.set(row.orderId, bucket);
+  }
+  const studentById = new Map(studentRows.map((s) => [s.id, s]));
+
+  return orders.map((order) => ({
+    ...order,
+    items: itemsByOrder.get(order.id) ?? [],
+    student: order.studentId ? (studentById.get(order.studentId) ?? null) : null,
+  }));
+}
+
+async function fetchExportBatch(
+  pool: Pool,
+  window: ResolvedExportWindow,
+  options: OrderExportOptions,
+  cursor: { createdAt: Date; id: string } | null,
+): Promise<ExportOrderRow[]> {
+  const { rows } = await query<ExportOrderRow>(
+    pool,
+    sql`
+    SELECT "id", "orderNumber", "createdAt", "collectionAt", "deliveredAt", "status", "kitchen",
+           "totalAmount"::text AS "totalAmount", "guestName", "guestPhone", "guestSessionId", "studentId"
+      FROM "Order"
+     WHERE ${buildExportWhere(window, options, cursor)}
+     ORDER BY "createdAt" ASC, "id" ASC
+     LIMIT ${EXPORT_BATCH_SIZE}
+  `,
+  );
+  return rows;
 }
 
 /**
@@ -189,7 +280,7 @@ export async function countExportRows(
  * client can accept it.
  */
 export function streamOrdersCsv(
-  prisma: PrismaClient,
+  pool: Pool,
   window: ResolvedExportWindow,
   options: OrderExportOptions = {},
 ): ReadableStream<Uint8Array> {
@@ -206,12 +297,8 @@ export function streamOrdersCsv(
 
       let batch: ExportRow[];
       try {
-        batch = await prisma.order.findMany({
-          where: buildExportWhere(window, options, cursor),
-          select: EXPORT_SELECT,
-          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-          take: EXPORT_BATCH_SIZE,
-        });
+        const baseRows = await fetchExportBatch(pool, window, options, cursor);
+        batch = await hydrateExportRows(pool, baseRows);
       } catch (err) {
         // The headers are already sent by the time this runs, so there is no
         // way to turn this into an HTTP error. Erroring the stream truncates

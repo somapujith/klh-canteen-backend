@@ -1,26 +1,27 @@
 import bcrypt from "bcryptjs";
-import type { Kitchen, Prisma, PrismaClient, Role } from "@prisma/client";
+import type { Pool } from "@neondatabase/serverless";
+import { raw as rawSql, sql, joinSql } from "../db/sql.js";
+import type { SqlFragment } from "../db/sql.js";
+import { WhereBuilder } from "../db/where.js";
+import * as userRepo from "../db/userRepo.js";
+import { isUniqueViolation, isForeignKeyViolation } from "../db/errors.js";
+import type { Kitchen, Role, School, User } from "../db/schema.js";
 import { ApiError } from "../middleware/errorHandler.js";
 import { revocationCutoffSeconds } from "../lib/jwt.js";
 
 /**
- * `passwordHash` is deliberately absent. `tokensValidFrom` is present because
- * an admin looking at a deactivated account needs to see that the revocation
- * cutoff actually moved — "deactivated but sessions still live" is exactly the
- * failure this feature exists to prevent.
+ * The public shape of a User row — `passwordHash` deliberately absent.
+ * `tokensValidFrom` is present because an admin looking at a deactivated
+ * account needs to see that the revocation cutoff actually moved —
+ * "deactivated but sessions still live" is exactly the failure this feature
+ * exists to prevent.
  */
-const userSelect = {
-  id: true,
-  role: true,
-  rollNumber: true,
-  email: true,
-  name: true,
-  kitchen: true,
-  createdAt: true,
-  isActive: true,
-  mustChangePassword: true,
-  tokensValidFrom: true,
-} as const;
+export type SafeUser = Omit<User, "passwordHash">;
+
+function toSafeUser(user: User): SafeUser {
+  const { passwordHash: _passwordHash, ...safe } = user;
+  return safe;
+}
 
 /**
  * Accounts that bulk and cohort deactivation refuse to touch, whatever the
@@ -97,23 +98,17 @@ export function decodeUserCursor(cursor: string): { createdAt: Date; id: string 
   return { createdAt, id };
 }
 
-function buildUserWhere(options: UserPageOptions): Prisma.UserWhereInput {
-  const and: Prisma.UserWhereInput[] = [];
-  if (options.role) and.push({ role: options.role });
-  if (options.isActive !== undefined) and.push({ isActive: options.isActive });
+function buildUserWhere(options: UserPageOptions): WhereBuilder {
+  const wb = new WhereBuilder();
+  wb.andIf(options.role, '"role" = $1::"Role"');
+  wb.andIf(options.isActive, '"isActive" = $1');
 
   const search = options.search?.trim();
   if (search) {
-    and.push({
-      OR: [
-        { name: { contains: search, mode: "insensitive" } },
-        { rollNumber: { contains: search, mode: "insensitive" } },
-        { email: { contains: search, mode: "insensitive" } },
-      ],
-    });
+    wb.and('("name" ILIKE $1 OR "rollNumber" ILIKE $1 OR "email" ILIKE $1)', `%${search}%`);
   }
 
-  return and.length ? { AND: and } : {};
+  return wb;
 }
 
 /**
@@ -126,46 +121,37 @@ function buildUserWhere(options: UserPageOptions): Prisma.UserWhereInput {
  * state and free-text search so an admin can find one leaver without paging
  * through the intake.
  */
-export async function listUsers(prisma: PrismaClient, options: UserPageOptions = {}) {
+export async function listUsers(pool: Pool, options: UserPageOptions = {}): Promise<UserPage<SafeUser>> {
   const limit = Math.min(
     Math.max(1, Math.trunc(options.limit ?? DEFAULT_USER_PAGE_SIZE)),
     MAX_USER_PAGE_SIZE,
   );
 
-  const where = buildUserWhere(options);
-  const and: Prisma.UserWhereInput[] = [where];
-
+  const wb = buildUserWhere(options);
   if (options.cursor) {
     const { createdAt, id } = decodeUserCursor(options.cursor);
     // Strictly "after" the cursor row in (createdAt DESC, id DESC) order.
-    and.push({
-      OR: [{ createdAt: { lt: createdAt } }, { AND: [{ createdAt }, { id: { lt: id } }] }],
-    });
+    wb.and('("createdAt", "id") < ($1, $2)', createdAt, id);
   }
 
   // One extra row is fetched purely to answer "is there another page?" without
   // a second COUNT query over the same predicate.
-  const rows = await prisma.user.findMany({
-    where: { AND: and },
-    select: userSelect,
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: limit + 1,
-  });
+  const rows = await userRepo.findMany(pool, wb.build(), rawSql('"createdAt" DESC, "id" DESC'), limit + 1);
 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = page[page.length - 1];
 
   return {
-    data: page,
+    data: page.map(toSafeUser),
     nextCursor: hasMore && last ? encodeUserCursor(last) : null,
     hasMore,
   };
 }
 
 /** Exact size of a filter's result set, for the preview/count affordances. */
-export async function countUsers(prisma: PrismaClient, options: UserPageOptions = {}) {
-  return prisma.user.count({ where: buildUserWhere(options) });
+export async function countUsers(pool: Pool, options: UserPageOptions = {}): Promise<number> {
+  return userRepo.count(pool, buildUserWhere(options).build());
 }
 
 // ---------------------------------------------------------------------------
@@ -179,24 +165,24 @@ interface CreateUserInput {
   password: string;
   rollNumber?: string;
   kitchen?: Kitchen;
+  school: School;
 }
 
-export async function createUser(prisma: PrismaClient, input: CreateUserInput) {
+export async function createUser(pool: Pool, input: CreateUserInput): Promise<SafeUser> {
   const passwordHash = await bcrypt.hash(input.password, 10);
   try {
-    return await prisma.user.create({
-      data: {
-        role: input.role,
-        name: input.name,
-        email: input.email,
-        passwordHash,
-        rollNumber: input.rollNumber,
-        kitchen: input.role === "ADMIN" ? input.kitchen : undefined,
-      },
-      select: userSelect,
+    const user = await userRepo.insert(pool, {
+      role: input.role,
+      name: input.name,
+      email: input.email,
+      passwordHash,
+      rollNumber: input.rollNumber,
+      kitchen: input.role === "ADMIN" ? input.kitchen : undefined,
+      school: input.school,
     });
-  } catch (err: any) {
-    if (err?.code === "P2002") {
+    return toSafeUser(user);
+  } catch (err) {
+    if (isUniqueViolation(err)) {
       throw new ApiError(409, "EMAIL_TAKEN", "A user with this email already exists");
     }
     throw err;
@@ -208,30 +194,36 @@ interface UpdateUserInput {
   kitchen?: Kitchen | null;
   role?: Role;
   password?: string;
+  school?: School;
 }
 
-export async function updateUser(prisma: PrismaClient, id: string, input: UpdateUserInput) {
-  const data: Record<string, unknown> = {};
-  if (input.name !== undefined) data.name = input.name;
-  if (input.role !== undefined) data.role = input.role;
-  if (input.kitchen !== undefined) data.kitchen = input.kitchen;
-  if (input.password) data.passwordHash = await bcrypt.hash(input.password, 10);
-
-  try {
-    return await prisma.user.update({
-      where: { id },
-      data,
-      select: userSelect,
-    });
-  } catch (err: any) {
-    if (err?.code === "P2025") {
-      throw new ApiError(404, "NOT_FOUND", "User not found");
-    }
-    throw err;
+export async function updateUser(pool: Pool, id: string, input: UpdateUserInput): Promise<SafeUser> {
+  const sets: SqlFragment[] = [];
+  if (input.name !== undefined) sets.push(sql`"name" = ${input.name}`);
+  if (input.role !== undefined) sets.push(sql`"role" = ${input.role}::"Role"`);
+  if (input.kitchen !== undefined) sets.push(sql`"kitchen" = ${input.kitchen}::"Kitchen"`);
+  if (input.school !== undefined) sets.push(sql`"school" = ${input.school}::"School"`);
+  if (input.password) {
+    const passwordHash = await bcrypt.hash(input.password, 10);
+    sets.push(sql`"passwordHash" = ${passwordHash}`);
   }
+
+  // updateFields() 404s via assertAffected() — same outcome as the old
+  // P2025 catch, without needing one. An empty `sets` (a body with no
+  // recognised fields) skips the UPDATE entirely rather than running an
+  // empty SET clause — Prisma's update({data:{}}) was a no-op-but-still-a-
+  // write; this is a no-op-and-no-write, same observable result.
+  if (sets.length === 0) {
+    const user = await userRepo.findById(pool, id);
+    if (!user) throw new ApiError(404, "NOT_FOUND", "User not found");
+    return toSafeUser(user);
+  }
+
+  const user = await userRepo.updateFields(pool, id, joinSql(sets));
+  return toSafeUser(user);
 }
 
-export async function deleteUser(prisma: PrismaClient, id: string, actorId: string) {
+export async function deleteUser(pool: Pool, id: string, actorId: string): Promise<void> {
   if (id === actorId) {
     throw new ApiError(400, "CANNOT_DELETE_SELF", "You cannot delete your own account");
   }
@@ -240,7 +232,7 @@ export async function deleteUser(prisma: PrismaClient, id: string, actorId: stri
   // but it fails with a raw constraint error that tells the admin nothing. A
   // student who has ever ordered is a deactivation, not a deletion: their rows
   // are the canteen's sales history.
-  const orderCount = await prisma.order.count({ where: { studentId: id } });
+  const orderCount = await userRepo.countOrdersByStudent(pool, id);
   if (orderCount > 0) {
     throw new ApiError(
       409,
@@ -250,12 +242,11 @@ export async function deleteUser(prisma: PrismaClient, id: string, actorId: stri
   }
 
   try {
-    await prisma.user.delete({ where: { id } });
-  } catch (err: any) {
-    if (err?.code === "P2025") {
-      throw new ApiError(404, "NOT_FOUND", "User not found");
-    }
-    if (err?.code === "P2003" || err?.code === "P2014") {
+    // deleteById() 404s via assertAffected() — same outcome as the old
+    // P2025 catch.
+    await userRepo.deleteById(pool, id);
+  } catch (err) {
+    if (isForeignKeyViolation(err)) {
       throw new ApiError(409, "USER_HAS_ORDERS", "Cannot delete a user with existing orders");
     }
     throw err;
@@ -323,7 +314,7 @@ interface SetActiveOptions {
  * Nothing is deleted, ever. Order history is the canteen's books.
  */
 export async function setUsersActive(
-  prisma: PrismaClient,
+  pool: Pool,
   ids: string[],
   active: boolean,
   actorId: string,
@@ -338,10 +329,7 @@ export async function setUsersActive(
     throw new ApiError(400, "TOO_MANY_USERS", `At most ${maxIds} users may be changed in one call`);
   }
 
-  const found = await prisma.user.findMany({
-    where: { id: { in: unique } },
-    select: { id: true, email: true, name: true, role: true, rollNumber: true, isActive: true },
-  });
+  const found = await userRepo.findManyByIds(pool, unique);
   const byId = new Map(found.map((u) => [u.id, u]));
 
   const skipped: SetActiveSkip[] = [];
@@ -377,10 +365,7 @@ export async function setUsersActive(
   const cutoff = active ? null : deactivationCutoff();
 
   if (targets.length > 0) {
-    await prisma.user.updateMany({
-      where: { id: { in: targets.map((u) => u.id) } },
-      data: active ? { isActive: true } : { isActive: false, tokensValidFrom: cutoff! },
-    });
+    await userRepo.setActiveByIds(pool, targets.map((u) => u.id), active, cutoff);
   }
 
   return {

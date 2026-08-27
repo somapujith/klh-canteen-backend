@@ -8,7 +8,7 @@ import {
   handleTelegramUpdate,
   verifyWebhookSecret,
 } from "../services/telegramService.js";
-import { getBindings, getRequestPrisma } from "../lib/context.js";
+import { getBindings, getRequestPool } from "../lib/context.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 import type { AppEnv } from "../types.js";
 
@@ -30,17 +30,17 @@ const linkLimiter = rateLimit({
 });
 
 telegramRouter.get("/", requireAuth("STUDENT"), async (c) => {
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const status = await getTelegramStatus(prisma, getBindings(c), user.id);
+  const status = await getTelegramStatus(pool, getBindings(c), user.id);
   return c.json(status);
 });
 
 telegramRouter.post("/link", requireAuth("STUDENT"), linkLimiter, async (c) => {
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const result = await startTelegramLink(prisma, getBindings(c), user.id);
-  await logAction(prisma, user.id, "TELEGRAM_LINK_STARTED", "User", user.id, {
+  const result = await startTelegramLink(pool, getBindings(c), user.id);
+  await logAction(pool, user.id, "TELEGRAM_LINK_STARTED", "User", user.id, {
     botUsername: result.botUsername,
     expiresAt: result.expiresAt,
   });
@@ -48,10 +48,10 @@ telegramRouter.post("/link", requireAuth("STUDENT"), linkLimiter, async (c) => {
 });
 
 telegramRouter.delete("/", requireAuth("STUDENT"), async (c) => {
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const result = await unlinkTelegram(prisma, user.id);
-  await logAction(prisma, user.id, "TELEGRAM_UNLINKED", "User", user.id);
+  const result = await unlinkTelegram(pool, user.id);
+  await logAction(pool, user.id, "TELEGRAM_UNLINKED", "User", user.id);
   return c.json(result);
 });
 
@@ -62,8 +62,8 @@ telegramRouter.post("/webhook", async (c) => {
     return c.json({ error: { message: "Invalid webhook secret", code: "FORBIDDEN" } }, 403);
   }
 
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const update = await c.req.json();
-  await handleTelegramUpdate(prisma, bindings, update);
+  await handleTelegramUpdate(pool, bindings, update);
   return c.json({ ok: true });
 });

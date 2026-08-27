@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import { env } from "hono/adapter";
-import { getPrisma } from "./prisma.js";
+import { getPool } from "./db.js";
 import type { AppEnv, Bindings } from "../types.js";
 
 /**
@@ -26,16 +26,16 @@ export function getBindings(c: Context<AppEnv>): Bindings {
 }
 
 /**
- * PrismaClient for the current request's DATABASE_URL, memoized on the request
- * context so repeated calls within one request share a client. The memo has to
+ * Pool for the current request's DATABASE_URL, memoized on the request
+ * context so repeated calls within one request share a pool. The memo has to
  * live here rather than in module scope because Workers invalidates a previous
- * request's sockets — see the note in lib/prisma.ts.
+ * request's sockets — see the note in lib/db.ts.
  */
-export function getRequestPrisma(c: Context<AppEnv>) {
-  const existing = c.get("prisma");
+export function getRequestPool(c: Context<AppEnv>) {
+  const existing = c.get("pool");
   if (existing) return existing;
 
-  const client = getPrisma(getBindings(c).DATABASE_URL);
-  c.set("prisma", client);
-  return client;
+  const pool = getPool(getBindings(c).DATABASE_URL);
+  c.set("pool", pool);
+  return pool;
 }

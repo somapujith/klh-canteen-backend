@@ -10,13 +10,14 @@ import {
 import { MIN_PASSWORD_LENGTH, MAX_PASSWORD_BYTES } from "../services/passwordPolicy.js";
 import { logAction } from "../services/auditService.js";
 import { requireAuth, requireAuthAllowPasswordChange } from "../middleware/auth.js";
-import { getBindings, getRequestPrisma } from "../lib/context.js";
+import { getBindings, getRequestPool } from "../lib/context.js";
 import { rateLimit, resetRateLimit } from "../middleware/rateLimit.js";
 import type { AppEnv } from "../types.js";
 
 const loginSchema = z.object({
   identifier: z.string().min(1),
   password: z.string().min(1),
+  school: z.enum(["KLH", "DRK"]),
 });
 
 const LOGIN_LIMIT_PREFIX = "login";
@@ -92,10 +93,10 @@ function normalizeIdentifier(identifier: string): string {
 export const authRouter = new Hono<AppEnv>();
 
 authRouter.post("/login", loginLimiter, async (c) => {
-  const { identifier, password } = loginSchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const { identifier, password, school } = loginSchema.parse(await c.req.json());
+  const pool = getRequestPool(c);
   const { JWT_SECRET } = getBindings(c);
-  const result = await login(prisma, JWT_SECRET, identifier, password);
+  const result = await login(pool, JWT_SECRET, identifier, password, school);
 
   // Credentials checked out, so this identifier is not under a guessing run
   // from this user's perspective: clear the counter so a student who mistyped
@@ -149,13 +150,13 @@ authRouter.post(
   changePasswordLimiter,
   async (c) => {
     const { currentPassword, newPassword } = changePasswordSchema.parse(await c.req.json());
-    const prisma = getRequestPrisma(c);
+    const pool = getRequestPool(c);
     const { JWT_SECRET } = getBindings(c);
     const user = c.get("user")!;
 
-    const result = await changeOwnPassword(prisma, JWT_SECRET, user.id, currentPassword, newPassword);
+    const result = await changeOwnPassword(pool, JWT_SECRET, user.id, currentPassword, newPassword);
     await resetRateLimit(c, CHANGE_PASSWORD_LIMIT_PREFIX, `u:${user.id}`);
-    await logAction(prisma, user.id, "PASSWORD_CHANGED", "User", user.id, {
+    await logAction(pool, user.id, "PASSWORD_CHANGED", "User", user.id, {
       clearedForcedChange: user.mustChangePassword,
     });
 
@@ -170,10 +171,10 @@ authRouter.post(
  * first and sort the password out after.
  */
 authRouter.post("/logout-everywhere", requireAuthAllowPasswordChange(), async (c) => {
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const result = await logoutEverywhere(prisma, user.id);
-  await logAction(prisma, user.id, "LOGOUT_EVERYWHERE", "User", user.id);
+  const result = await logoutEverywhere(pool, user.id);
+  await logAction(pool, user.id, "LOGOUT_EVERYWHERE", "User", user.id);
   return c.json(result);
 });
 
@@ -201,11 +202,11 @@ const adminResetSchema = z
  */
 authRouter.post("/admin/reset-password", requireAuth("ADMIN"), changePasswordLimiter, async (c) => {
   const input = adminResetSchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const actor = c.get("user")!;
 
-  const result = await adminResetPassword(prisma, { id: actor.id, role: actor.role }, input);
-  await logAction(prisma, actor.id, "PASSWORD_RESET_BY_ADMIN", "User", result.userId, {
+  const result = await adminResetPassword(pool, { id: actor.id, role: actor.role }, input);
+  await logAction(pool, actor.id, "PASSWORD_RESET_BY_ADMIN", "User", result.userId, {
     rollNumber: result.rollNumber,
     // The password itself is never written to the audit log.
     generated: input.temporaryPassword === undefined,

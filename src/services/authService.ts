@@ -1,5 +1,8 @@
 import bcrypt from "bcryptjs";
-import type { PrismaClient, Role } from "@prisma/client";
+import type { Pool } from "@neondatabase/serverless";
+import { sql, joinSql } from "../db/sql.js";
+import * as userRepo from "../db/userRepo.js";
+import type { Role, School } from "../db/schema.js";
 import { signToken, revocationCutoffSeconds } from "../lib/jwt.js";
 import { ApiError } from "../middleware/errorHandler.js";
 import { assertPasswordStrength, generateTemporaryPassword } from "./passwordPolicy.js";
@@ -11,27 +14,6 @@ import { LEGACY_STUDENT_EMAIL_DOMAIN } from "./studentRosterService.js";
  * get weaker the moment they set their own password.
  */
 const BCRYPT_COST = 12;
-
-/**
- * Everything an authenticated request needs to know about the caller, fetched
- * in ONE indexed primary-key lookup per request.
- *
- * The identity columns (name/email/rollNumber) ride along not because the
- * middleware needs them but because GET /auth/me does — carrying them here
- * turns what would be a second round trip into zero extra cost, since the row
- * is already being read and returned over the same connection.
- */
-const sessionUserSelect = {
-  id: true,
-  role: true,
-  kitchen: true,
-  name: true,
-  email: true,
-  rollNumber: true,
-  isActive: true,
-  mustChangePassword: true,
-  tokensValidFrom: true,
-} as const;
 
 export type SessionUser = {
   id: string;
@@ -53,12 +35,20 @@ export type SessionUser = {
  * because nothing ever asked the database whether it still existed. Returns
  * null when the row is gone.
  */
-export async function loadSessionUser(prisma: PrismaClient, userId: string): Promise<SessionUser | null> {
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: sessionUserSelect,
-  });
-  return user as SessionUser | null;
+export async function loadSessionUser(pool: Pool, userId: string): Promise<SessionUser | null> {
+  const user = await userRepo.findById(pool, userId);
+  if (!user) return null;
+  return {
+    id: user.id,
+    role: user.role,
+    kitchen: user.kitchen,
+    name: user.name,
+    email: user.email,
+    rollNumber: user.rollNumber,
+    isActive: user.isActive,
+    mustChangePassword: user.mustChangePassword,
+    tokensValidFrom: user.tokensValidFrom,
+  };
 }
 
 const LEGACY_SUFFIX = `@${LEGACY_STUDENT_EMAIL_DOMAIN}`;
@@ -91,27 +81,34 @@ export function loginIdentifierCandidates(identifier: string): string[] {
   return candidates;
 }
 
-export async function login(prisma: PrismaClient, jwtSecret: string, identifier: string, password: string) {
+export async function login(
+  pool: Pool,
+  jwtSecret: string,
+  identifier: string,
+  password: string,
+  school: School,
+) {
   const [typed, legacyStripped] = loginIdentifierCandidates(identifier);
 
-  let user = typed
-    ? await prisma.user.findFirst({ where: { OR: [{ email: typed }, { rollNumber: typed }] } })
-    : null;
+  let user = typed ? await userRepo.findFirstByEmailOrRollNumber(pool, typed) : null;
 
   if (!user && legacyStripped) {
     // Scoped to STUDENT: `<roll>@klh.edu.in` was only ever a *student*
     // username. A staff address like superadmin@klh.edu.in already matched
     // above; letting its local part ("superadmin") reach a second lookup that
     // could match any role would be handing an attacker a free alias.
-    user = await prisma.user.findFirst({
-      where: { role: "STUDENT", OR: [{ email: legacyStripped }, { rollNumber: legacyStripped }] },
-    });
+    user = await userRepo.findFirstByEmailOrRollNumber(pool, legacyStripped, { role: "STUDENT" });
   }
 
   if (!user) throw new ApiError(401, "INVALID_CREDENTIALS", "Invalid credentials");
 
   const valid = await bcrypt.compare(password, user.passwordHash);
   if (!valid) throw new ApiError(401, "INVALID_CREDENTIALS", "Invalid credentials");
+
+  // Checked only after the password, with the SAME generic message as a wrong
+  // password: a distinct "wrong school" error would let anyone holding a
+  // correct password enumerate which school an account actually belongs to.
+  if (user.school !== school) throw new ApiError(401, "INVALID_CREDENTIALS", "Invalid credentials");
 
   // Checked only after the password, so a wrong password and a deactivated
   // account are indistinguishable to someone who does not already hold the
@@ -148,13 +145,13 @@ export async function login(prisma: PrismaClient, jwtSecret: string, identifier:
  * what keeps "change your password" from also meaning "and now log in again".
  */
 export async function changeOwnPassword(
-  prisma: PrismaClient,
+  pool: Pool,
   jwtSecret: string,
   userId: string,
   currentPassword: string,
   newPassword: string
 ) {
-  const user = await prisma.user.findUnique({ where: { id: userId } });
+  const user = await userRepo.findById(pool, userId);
   if (!user) throw new ApiError(401, "USER_NOT_FOUND", "Account no longer exists");
   if (!user.isActive) {
     throw new ApiError(403, "ACCOUNT_DEACTIVATED", "This account has been deactivated.");
@@ -176,17 +173,18 @@ export async function changeOwnPassword(
   const cutoffSeconds = revocationCutoffSeconds();
   const passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
 
-  await prisma.user.update({
-    where: { id: userId },
-    data: {
-      passwordHash,
-      mustChangePassword: false,
+  await userRepo.updateFields(
+    pool,
+    userId,
+    joinSql([
+      sql`"passwordHash" = ${passwordHash}`,
+      sql`"mustChangePassword" = ${false}`,
       // Kills every token minted before the cutoff. If this password change was
       // a response to "someone else knows my password", that someone is logged
       // out by this write and cannot get back in.
-      tokensValidFrom: new Date(cutoffSeconds * 1000),
-    },
-  });
+      sql`"tokensValidFrom" = ${new Date(cutoffSeconds * 1000)}`,
+    ]),
+  );
 
   const token = signToken(
     { sub: user.id, role: user.role, kitchen: user.kitchen },
@@ -201,17 +199,11 @@ export async function changeOwnPassword(
  * every outstanding token for this user — the current one included. There is
  * no replacement token: signing out is supposed to sign you out.
  */
-export async function logoutEverywhere(prisma: PrismaClient, userId: string) {
+export async function logoutEverywhere(pool: Pool, userId: string) {
   const cutoff = new Date(revocationCutoffSeconds() * 1000);
-  try {
-    await prisma.user.update({
-      where: { id: userId },
-      data: { tokensValidFrom: cutoff },
-    });
-  } catch (err: any) {
-    if (err?.code === "P2025") throw new ApiError(404, "NOT_FOUND", "User not found");
-    throw err;
-  }
+  // updateFields 404s via assertAffected() if the row is gone — no try/catch
+  // needed, unlike the old P2025 check.
+  await userRepo.updateFields(pool, userId, sql`"tokensValidFrom" = ${cutoff}`);
   return { revokedBefore: cutoff.toISOString() };
 }
 
@@ -268,24 +260,18 @@ export interface AdminResetInput {
  * is never recoverable afterwards.
  */
 export async function adminResetPassword(
-  prisma: PrismaClient,
+  pool: Pool,
   actor: { id: string; role: Role },
   input: AdminResetInput
 ) {
-  const where = input.userId
-    ? { id: input.userId }
-    : input.rollNumber
-      ? { rollNumber: input.rollNumber }
-      : input.email
-        ? { email: input.email }
-        : null;
-  if (!where) {
+  if (!input.userId && !input.rollNumber && !input.email) {
     throw new ApiError(400, "MISSING_TARGET", "Provide one of userId, rollNumber or email.");
   }
 
-  const target = await prisma.user.findFirst({
-    where,
-    select: { id: true, role: true, name: true, email: true, rollNumber: true },
+  const target = await userRepo.findByIdOrRollOrEmail(pool, {
+    id: input.userId,
+    rollNumber: input.rollNumber,
+    email: input.email,
   });
   if (!target) throw new ApiError(404, "NOT_FOUND", "User not found");
 
@@ -301,16 +287,17 @@ export async function adminResetPassword(
   });
 
   const passwordHash = await bcrypt.hash(temporaryPassword, BCRYPT_COST);
-  await prisma.user.update({
-    where: { id: target.id },
-    data: {
-      passwordHash,
-      mustChangePassword: true,
+  await userRepo.updateFields(
+    pool,
+    target.id,
+    joinSql([
+      sql`"passwordHash" = ${passwordHash}`,
+      sql`"mustChangePassword" = ${true}`,
       // A reset is also a revocation: whoever was riding the old password's
       // sessions is signed out at the same moment the password stops working.
-      tokensValidFrom: new Date(revocationCutoffSeconds() * 1000),
-    },
-  });
+      sql`"tokensValidFrom" = ${new Date(revocationCutoffSeconds() * 1000)}`,
+    ]),
+  );
 
   return {
     userId: target.id,

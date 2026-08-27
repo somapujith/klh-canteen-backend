@@ -2,37 +2,64 @@ import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import request from "supertest";
 import bcrypt from "bcryptjs";
 import { signToken } from "../src/lib/jwt.js";
+import { sql, query } from "../src/db/sql.js";
+import * as userRepo from "../src/db/userRepo.js";
+import * as categoryRepo from "../src/db/categoryRepo.js";
+import * as menuItemRepo from "../src/db/menuItemRepo.js";
+import type { Order } from "../src/db/schema.js";
 
-import { describeDb, getTestPrisma, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
-import { startTestServer, closeTestServer } from "./helpers/app.js";
+import { describeDb, getTestPool, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
+import { startTestServer, closeTestServer, seedOrder } from "./helpers/app.js";
 
 // The database is reached ONLY through tests/helpers/db.ts, which refuses to
 // hand out a client until tests/setup/vitest.setup.ts has proved the target is
 // a disposable test database. `describeDb` skips (loudly) when none is
 // configured — it never falls back to .env. See TESTING.md.
-const prisma = testDb.enabled ? getTestPrisma() : (undefined as any);
+const pool = testDb.enabled ? getTestPool() : (undefined as any);
 const server = testDb.enabled ? await startTestServer() : (undefined as any);
+
+async function findOrder(id: string): Promise<Order | null> {
+  const { rows } = await query<Order>(pool, sql`SELECT * FROM "Order" WHERE "id" = ${id}`);
+  return rows[0] ?? null;
+}
 
 async function makeAdminToken() {
   const passwordHash = await bcrypt.hash("x", 12);
-  const admin = await prisma.user.create({
-    data: { role: "ADMIN", email: `admin-${Date.now()}-${Math.random()}@klh.edu.in`, passwordHash, name: "A" },
+  const admin = await userRepo.insert(pool, {
+    role: "ADMIN",
+    email: `admin-${Date.now()}-${Math.random()}@klh.edu.in`,
+    passwordHash,
+    name: "A",
+    school: "KLH",
   });
   return { id: admin.id, token: signToken({ sub: admin.id, role: "ADMIN" }, process.env.JWT_SECRET!) };
 }
 
 async function makeStudentToken() {
   const passwordHash = await bcrypt.hash("x", 12);
-  const student = await prisma.user.create({
-    data: { role: "STUDENT", rollNumber: `R${Date.now()}-${Math.random()}`, email: `s-${Date.now()}-${Math.random()}@klh.edu.in`, passwordHash, name: "S" },
+  const student = await userRepo.insert(pool, {
+    role: "STUDENT",
+    rollNumber: `R${Date.now()}-${Math.random()}`,
+    email: `s-${Date.now()}-${Math.random()}@klh.edu.in`,
+    passwordHash,
+    name: "S",
+    school: "KLH",
   });
   return signToken({ sub: student.id, role: "STUDENT" }, process.env.JWT_SECRET!);
 }
 
 async function makeItem(stockQty: number) {
-  const category = await prisma.category.create({ data: { name: `Cat-${Date.now()}-${Math.random()}`, sortOrder: 1 } });
-  return prisma.menuItem.create({
-    data: { name: "Tea", imageUrl: "https://x.com/tea.jpg", price: "10.00", stockQty, categoryId: category.id },
+  const category = await categoryRepo.insertCategory(pool, {
+    name: `Cat-${Date.now()}-${Math.random()}`,
+    sortOrder: 1,
+    kitchen: "SNACKS",
+  });
+  return menuItemRepo.insertMenuItem(pool, {
+    name: "Tea",
+    imageUrl: "https://x.com/tea.jpg",
+    price: "10.00",
+    stockQty,
+    categoryId: category.id,
   });
 }
 
@@ -83,7 +110,7 @@ describeDb("Admin order board", () => {
       expect(openRes.body.items).toHaveLength(1);
       expect(openRes.body.isLockedByOther).toBe(false);
 
-      const dbOrder = await prisma.order.findUnique({ where: { id: orderId } });
+      const dbOrder = await findOrder(orderId);
       expect(dbOrder?.seenByAdmin).toBe(true);
       expect(dbOrder?.seenAt).not.toBeNull();
     });
@@ -112,7 +139,7 @@ describeDb("Admin order board", () => {
       expect(secondOpen.status).toBe(200);
       expect(secondOpen.body.isLockedByOther).toBe(true);
 
-      const dbOrder = await prisma.order.findUnique({ where: { id: orderId } });
+      const dbOrder = await findOrder(orderId);
       // Lock stays with the first admin; the second admin did not steal it.
       expect(dbOrder?.lockedByAdminId).toBe(adminOne.id);
     });
@@ -157,19 +184,21 @@ describeDb("Admin order board", () => {
       const admin = await makeAdminToken();
       const item = await makeItem(5);
       const passwordHash = await bcrypt.hash("x", 12);
-      const student = await prisma.user.create({
-        data: { role: "STUDENT", rollNumber: `R${Date.now()}-${Math.random()}`, email: `s-${Date.now()}-${Math.random()}@klh.edu.in`, passwordHash, name: "S" },
+      const student = await userRepo.insert(pool, {
+        role: "STUDENT",
+        rollNumber: `R${Date.now()}-${Math.random()}`,
+        email: `s-${Date.now()}-${Math.random()}@klh.edu.in`,
+        passwordHash,
+        name: "S",
+        school: "KLH",
       });
-      const legacy = await prisma.order.create({
-        data: {
-          studentId: student.id,
-          status: "PREPARING",
-          kitchen: "SNACKS",
-          token: `legacy-${Date.now()}-${Math.random()}`,
-          orderNumber: 4321,
-          totalAmount: "10.00",
-          items: { create: [{ menuItemId: item.id, quantity: 1, priceAtOrder: "10.00" }] },
-        },
+      const legacy = await seedOrder({
+        studentId: student.id,
+        status: "PREPARING",
+        kitchen: "SNACKS",
+        menuItemId: item.id,
+        qty: 1,
+        price: "10.00",
       });
 
       const res = await request(server)
@@ -216,7 +245,7 @@ describeDb("Admin order board", () => {
       expect(delivered.status).toBe(200);
       expect(delivered.body.status).toBe("DELIVERED");
 
-      const updatedItem = await prisma.menuItem.findUnique({ where: { id: item.id } });
+      const updatedItem = await menuItemRepo.findMenuItemById(pool, item.id);
       expect(updatedItem?.stockQty).toBe(2);
     });
 
@@ -251,7 +280,7 @@ describeDb("Admin order board", () => {
       const { id: orderId } = orderRes.body[0];
 
       await advanceOrderTo(orderId, admin.token, "COOKED");
-      await prisma.menuItem.update({ where: { id: item.id }, data: { stockQty: 0 } });
+      await menuItemRepo.updateMenuItem(pool, item.id, { stockQty: 0 });
 
       const res = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
@@ -283,7 +312,7 @@ describeDb("Admin order board", () => {
       // Stock drops below what the order needs for just the second item, after
       // it reached COOKED (e.g. another admin delivered a different order for
       // the same item in the meantime).
-      await prisma.menuItem.update({ where: { id: scarceItem.id }, data: { stockQty: 1 } });
+      await menuItemRepo.updateMenuItem(pool, scarceItem.id, { stockQty: 1 });
 
       const res = await request(server)
         .patch(`/admin/orders/${orderId}/status`)
@@ -292,10 +321,10 @@ describeDb("Admin order board", () => {
       expect(res.status).toBe(409);
       expect(res.body.error.code).toBe("OUT_OF_STOCK");
 
-      const untouchedItem = await prisma.menuItem.findUnique({ where: { id: plentifulItem.id } });
+      const untouchedItem = await menuItemRepo.findMenuItemById(pool, plentifulItem.id);
       expect(untouchedItem?.stockQty).toBe(10);
 
-      const order = await prisma.order.findUnique({ where: { id: orderId } });
+      const order = await findOrder(orderId);
       // Stays at COOKED, not reset to PENDING, since it had already progressed.
       expect(order?.status).toBe("COOKED");
     });
@@ -326,7 +355,7 @@ describeDb("Admin order board", () => {
       expect(secondDeliver.status).toBe(409);
       expect(secondDeliver.body.error.code).toBe("ALREADY_DELIVERED");
 
-      const updatedItem = await prisma.menuItem.findUnique({ where: { id: item.id } });
+      const updatedItem = await menuItemRepo.findMenuItemById(pool, item.id);
       // Only decremented once, not twice.
       expect(updatedItem?.stockQty).toBe(4);
     });
@@ -388,7 +417,7 @@ describeDb("Admin order board", () => {
         expect(conflict.body.error.code).toBe("ALREADY_DELIVERED");
       }
 
-      const updatedItem = await prisma.menuItem.findUnique({ where: { id: item.id } });
+      const updatedItem = await menuItemRepo.findMenuItemById(pool, item.id);
       expect(updatedItem?.stockQty).toBe(2);
     }, 20000);
 
@@ -416,15 +445,16 @@ describeDb("Admin order board", () => {
       const orderBRes = await place(3);
       expect(orderBRes.status).toBe(409);
       expect(orderBRes.body.error.code).toBe("OUT_OF_STOCK");
-      expect(await prisma.order.count()).toBe(1);
+      const { rows: countRows } = await query<{ count: string }>(pool, sql`SELECT COUNT(*)::bigint AS count FROM "Order"`);
+      expect(Number(countRows[0].count)).toBe(1);
 
       // Physical stock has not moved yet; it is only committed on delivery.
-      const reserved = await prisma.menuItem.findUnique({ where: { id: item.id } });
+      const reserved = await menuItemRepo.findMenuItemById(pool, item.id);
       expect(reserved!.stockQty).toBe(5);
 
       await advanceOrderTo(orderARes.body[0].id, admin.token, "DELIVERED");
 
-      const settled = await prisma.menuItem.findUnique({ where: { id: item.id } });
+      const settled = await menuItemRepo.findMenuItemById(pool, item.id);
       expect(settled!.stockQty).toBe(2);
       expect(settled!.stockQty).toBeGreaterThanOrEqual(0);
       // The reservation was handed back once the stock was actually consumed,

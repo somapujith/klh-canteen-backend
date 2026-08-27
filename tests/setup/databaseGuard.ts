@@ -25,7 +25,7 @@
  *                 therefore can never pass this check — even if someone
  *                 defeats every string check above.
  *
- * Nothing in tests/ may construct a PrismaClient except through
+ * Nothing in tests/ may construct a Pool except through
  * tests/helpers/db.ts, which refuses to hand one out until this module has
  * signed off. Failure is a thrown error with a banner, never a warning and
  * never a silent fall-through.

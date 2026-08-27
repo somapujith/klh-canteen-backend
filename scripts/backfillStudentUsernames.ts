@@ -13,7 +13,7 @@
  * the wiring and the printing.
  */
 import "dotenv/config";
-import { getPrisma } from "../src/lib/prisma.js";
+import { getPool } from "../src/lib/db.js";
 import {
   previewStudentUsernameBackfill,
   applyStudentUsernameBackfill,
@@ -27,10 +27,10 @@ if (!databaseUrl) {
   process.exit(1);
 }
 
-const prisma = getPrisma(databaseUrl);
+const pool = getPool(databaseUrl);
 
 async function main() {
-  const preview = await previewStudentUsernameBackfill(prisma);
+  const preview = await previewStudentUsernameBackfill(pool);
 
   console.log("");
   console.log(`STUDENT accounts total ............ ${preview.totalStudents}`);
@@ -60,7 +60,7 @@ async function main() {
     return;
   }
 
-  const changed = await applyStudentUsernameBackfill(prisma);
+  const changed = await applyStudentUsernameBackfill(pool);
   console.log("");
   console.log(`Updated ${changed} student username(s).`);
   console.log("Old and new forms both still log in — see login() in src/services/authService.ts.");
@@ -71,4 +71,4 @@ main()
     console.error(err);
     process.exitCode = 1;
   })
-  .finally(() => prisma.$disconnect());
+  .finally(() => pool.end());

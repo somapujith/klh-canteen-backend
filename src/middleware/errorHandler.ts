@@ -1,5 +1,4 @@
 import type { ErrorHandler } from "hono";
-import { Prisma } from "@prisma/client";
 import { ZodError } from "zod";
 import type { AppEnv } from "../types.js";
 
@@ -13,13 +12,15 @@ export class ApiError extends Error {
   }
 }
 
-// Prisma P2028 = "Transaction API error" (e.g. the transaction timed out,
-// commonly while waiting on a row lock under heavy concurrent contention —
-// see updateOrderStatus's FOR UPDATE locking). This is expected backpressure
-// under load, not a server bug, so surface it as a retryable 409 instead of
+// Postgres 55P03 lock_not_available / 57014 query_canceled — raised by the
+// SET LOCAL lock_timeout / statement_timeout guards in src/db/tx.ts's
+// withTransaction (e.g. updateOrderStatus's FOR UPDATE locking timing out
+// under heavy concurrent contention). This is expected backpressure under
+// load, not a server bug, so surface it as a retryable 409 instead of
 // leaking a raw 500 with internal error details to the client.
 function isRetryableTransactionError(err: unknown): boolean {
-  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2028";
+  const code = (err as { code?: string } | null)?.code;
+  return code === "55P03" || code === "57014";
 }
 
 export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {

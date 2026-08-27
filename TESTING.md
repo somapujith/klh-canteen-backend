@@ -17,24 +17,18 @@ disposable test database.
 ## Quick start
 
 ```bash
-cp .env.test.example .env.test   # once
-npm run test:db:up               # starts Postgres + the Neon WS proxy, migrates
-npm test
+cp .env.test.example .env.test   # once — fill in the test branch's connection string
+npm test                         # applies migrations to the test branch, then runs the suite
 ```
 
-Tear down when you are done:
-
-```bash
-npm run test:db:down             # removes the containers and their data
-```
+There is nothing to start or tear down: `.env.test` points at a dedicated Neon
+branch (project `KLH Canteen`, branch `test`, database `klh_canteen_test`),
+not a local container.
 
 | Script | What it does |
 | --- | --- |
 | `npm test` | Runs the suite. Safe with `.env` present. |
 | `npm run test:watch` | Same, in watch mode. |
-| `npm run test:db:up` | Starts the test containers and applies migrations. |
-| `npm run test:db:down` | Destroys the test containers and their volumes. |
-| `npm run test:db:reset` | `down` then `up` — a guaranteed-clean database. |
 | `npm run test:db:migrate` | Applies migrations to the test database only. |
 | `npm run typecheck:tests` | Typechecks `src` + `tests` together. |
 
@@ -67,9 +61,9 @@ to `.env`.
   credentials are ignored in this comparison, so re-writing the username does
   not get you past it;
 * the database name must contain `test` (`neondb` therefore cannot pass);
-* the host must be local or a CI service host (`localhost`, `127.0.0.1`,
-  `host.docker.internal`, `postgres`, `db`, …). Anything else additionally
-  requires `ALLOW_REMOTE_TEST_DATABASE=1`;
+* the host must be local/CI, or the target must set
+  `ALLOW_REMOTE_TEST_DATABASE=1` — required for the Neon test branch, so
+  pointing at a remote target is always a deliberate opt-in, never implicit;
 * passwords are redacted from every message the guard prints.
 
 ### Layer 2 — a physical marker inside the database
@@ -83,8 +77,7 @@ in the target database.
 * The live database has 154 users and 191 orders, so it can never acquire the
   marker, and therefore can never pass this check — even if someone crafted a
   connection string that satisfied every rule in Layer 1.
-* It lives in its own schema so `prisma db push` (see *Known issues*) cannot
-  drop it.
+* It lives in its own schema, isolated from `db/migrations/*` entirely.
 
 ### Where the layers run
 
@@ -94,8 +87,8 @@ in the target database.
   a single `beforeAll`/`beforeEach` is even registered) — Layers 0, 1 and a
   re-verification of Layer 2.
 * `tests/helpers/db.ts` is the only door to the database. It refuses to hand out
-  a `PrismaClient`, and `resetDatabase()` refuses to delete anything, until the
-  setup file has signed off.
+  a `Pool`, and `resetDatabase()` refuses to delete anything, until the setup
+  file has signed off.
 
 `tests/databaseGuard.test.ts` is the regression test for all of this. It reads
 the **actual** live URL out of `.env` at run time and asserts the guard refuses
@@ -123,7 +116,7 @@ $ mv .env.test .env.test.bak && DATABASE_URL="<the URL from .env>" npx vitest ru
 
 ```
 $ # a database whose NAME passes every string rule, but which holds one real user
-$ TEST_DATABASE_URL="postgresql://klh_test:...@localhost:55433/fake_test_prod" npx vitest run
+$ TEST_DATABASE_URL="postgresql://...@ep-some-branch.neon.tech/fake_test_prod" ALLOW_REMOTE_TEST_DATABASE=1 npx vitest run
   reason : database already contains real data (1 users, 0 orders) and has no test marker
 exit=1
 ```
@@ -132,52 +125,45 @@ exit=1
 
 ## The test database
 
-### Option A — local Docker (default, no credentials, works offline)
+A dedicated Neon **branch** (project `KLH Canteen`, branch `test`), never
+`main`/production, holding one database whose name contains `test`
+(`klh_canteen_test`). A real Neon endpoint terminates WebSockets itself —
+`@neondatabase/serverless` talks to it directly, no local proxy needed.
 
-`docker-compose.test.yml` runs two containers:
+To point at a different (or newly created) branch:
 
-| Service | Port | Why |
-| --- | --- | --- |
-| `postgres-test` | 55433 | The database. Uses `tmpfs`, so nothing survives a `down`. |
-| `wsproxy-test` | 55480 | The app talks to Postgres through `@neondatabase/serverless`, which speaks the Postgres protocol over a **WebSocket**, not raw TCP. This terminates the WebSocket and forwards to Postgres. Without it the driver cannot reach a plain local Postgres at all. |
-
-Ports are deliberately different from `docker-compose.yml` (the dev database on
-5433) so the two can never be confused or collide.
-
-### Option B — a dedicated Neon branch
-
-Only if you cannot run Docker.
-
-1. In the Neon console, create a **branch** — never `main`/production.
-2. Give it a database whose name contains `test` (e.g. `klh_test`). A branch
-   whose database is still called `neondb` will be refused.
+1. In the Neon console (or `neonctl branches create --project-id <id> --name <name>`),
+   create a branch that is not `main`/production.
+2. Give it a database whose name contains `test`
+   (`neonctl databases create --project-id <id> --branch <name> --name foo_test`).
+   A branch whose only database is still called `neondb` will be refused.
 3. In `.env.test`:
    ```
-   DATABASE_URL="postgresql://<user>:********@<your-project>.neon.tech/neondb?sslmode=require"
+   DATABASE_URL="postgresql://<user>:********@<your-branch>.neon.tech/foo_test?sslmode=require"
    ALLOW_REMOTE_TEST_DATABASE=1
    ```
-   Leave `NEON_WS_PROXY` unset — a real Neon endpoint terminates WebSockets itself.
-4. **Add `.env.test` to `.gitignore` first.** The committed `.env.test` contains
-   only throwaway local Docker credentials; a Neon connection string is a secret.
+4. `.env.test` is gitignored — a Neon connection string is a secret, never
+   commit one.
 
-The guard still refuses the URL if it matches `.env`, and the marker check still
-requires the branch to have been empty when the suite first claimed it.
+The guard still refuses the URL if it matches `.env`, and the marker check
+still requires the branch to have been empty when the suite first claimed it.
 
 ### Schema setup
 
-`globalSetup` runs `prisma migrate deploy` against the test URL on every run
-(set `SKIP_TEST_MIGRATIONS=1` to skip it once the schema is settled). It passes
-`DATABASE_URL` explicitly *and* repoints `DOTENV_CONFIG_PATH` at `.env.test`,
-because `prisma.config.ts` does `import "dotenv/config"` and would otherwise
-read `.env`.
+`globalSetup` runs `runMigrations()` (`scripts/migrate.ts`) against the test
+URL on every run (set `SKIP_TEST_MIGRATIONS=1` to skip it once the schema is
+settled). It applies any `db/migrations/*/migration.sql` not yet recorded in
+the target database's own `_migrations` tracking table, in order — the same
+function used by `npm run migrate:deploy` for production and by
+`tests/setup/migrateTestDatabase.ts` (`npm run test:db:migrate`).
 
 ### Cleanup between tests
 
 `resetDatabase()` `TRUNCATE`s every table in the `public` schema except
-`_prisma_migrations`, rather than running a hand-maintained list of
-`deleteMany()` calls. The schema is changing weekly right now, and a hardcoded
-list silently stops cleaning newly added tables — which shows up later as
-cross-test pollution nobody can reproduce.
+`_migrations`, rather than running a hand-maintained list of `deleteMany()`
+calls. The schema is changing weekly right now, and a hardcoded list silently
+stops cleaning newly added tables — which shows up later as cross-test
+pollution nobody can reproduce.
 
 ---
 
@@ -186,14 +172,14 @@ cross-test pollution nobody can reproduce.
 | Area | File | Notes |
 | --- | --- | --- |
 | The guard itself | `tests/databaseGuard.test.ts` | Refuses the real `.env` URL, non-test names, un-opted-in remotes; redacts passwords. |
-| Migrations reproduce the schema | `tests/schemaDrift.test.ts` | **Currently failing on purpose** — see *Known issues*. |
+| The raw-SQL builder | `tests/unit/sql.test.ts` | Placeholder numbering, nested-fragment splicing, `VALUES` list construction — DB-free. |
 | Guest sessions (crypto) | `tests/guestOrdering.test.ts` | Round-trip, tampered signature, wrong secret, swapped session id, foreign-prefix token replayed as a session, expired, future-dated, garbage. |
 | Guest ordering + **isolation** | `tests/guestOrdering.test.ts` | Session A gets a **404** — byte-identical to a non-existent id — for session B's order; no header → 401; forged/expired/wrong-secret token → 401; a guest cannot reach a student's order; the session id is never echoed back. |
 | Pre-booking | `tests/preBooking.test.ts` | Slot flooring; `COLLECTION_WINDOW_PAST`; `COLLECTION_WINDOW_TOO_FAR`; omitting `collectionAt` means ASAP (`NULL`) and takes no seat; a full window returns 409 `COLLECTION_WINDOW_FULL`; **12 concurrent bookings for 3 seats admit exactly 3**; a two-kitchen cart books both kitchens or neither. |
 | Admin pagination | `tests/adminOrdersPagination.test.ts` | Bare-array default (+ `X-Next-Cursor` / `X-Has-More` / `Access-Control-Expose-Headers`); `?format=envelope`; cursor walking with no duplicates or gaps; the keyset property (an order arriving mid-scroll does not push a row off the next page); active-only default; `?active=false`; status filter; page-size ceiling; malformed cursor → 400; kitchen scoping. |
 | Guest orders in admin views | `tests/adminOrdersPagination.test.ts` | `studentId = NULL` rows list, open and advance without crashing; `customer.type === "GUEST"`; anonymous guests get a label; the session id is never leaked to an admin. |
 | Identity rate limiting | `tests/rateLimitIdentity.test.ts` | **No lockout**: the correct password still works after 10 wrong ones; login never returns 429; one student's failures never touch another's counter; counters are keyed on the normalised identity and nothing network-derived; a successful login clears the counter. Also: the `reject` strategy *does* 429 the 6th guest order, and anonymous traffic is not limited by network address. |
-| Pre-existing suites | `auth`, `menu`, `orders`, `adminOrders`, `studentImport` | Ported onto the guarded helpers; no test touches the database except through `tests/helpers/db.ts`. |
+| Pre-existing suites | `auth`, `menu`, `orders`, `adminOrders`, `studentImport`, `studentUsernames` | Ported onto the guarded helpers; no test touches the database except through `tests/helpers/db.ts`. |
 
 ## What is **not** covered, and why
 
@@ -213,38 +199,12 @@ cross-test pollution nobody can reproduce.
   binding is absent and every emit is a no-op, so anything "testable" here today
   would be theatre. This needs `vitest-pool-workers` and is the largest
   remaining gap.
-* **`prisma migrate diff` in CI without a database.** The drift check needs a
-  live target, so it runs as part of the suite rather than as a standalone step.
 
 ---
 
 ## Known issues found by re-enabling the suite
 
-### 1. `prisma/migrations` does not reproduce `prisma/schema.prisma` (open)
-
-`tests/schemaDrift.test.ts` fails. A database built from the migration history
-alone is missing:
-
-```sql
-ALTER TYPE "OrderStatus" ADD VALUE 'PREPARING';
-ALTER TYPE "OrderStatus" ADD VALUE 'COOKED';
-ALTER TABLE "Order" ADD COLUMN "seenAt" TIMESTAMP(3),
-                   ADD COLUMN "seenByAdmin" BOOLEAN NOT NULL DEFAULT false;
-```
-
-These exist in `schema.prisma` and in the running database, but in no
-migration — the signature of a `db push` against a live database. Consequences:
-a new environment, a disaster-recovery restore or a fresh Neon branch comes up
-with a schema that **cannot even represent the `PREPARING` and `COOKED` order
-statuses**.
-
-The test bootstrap reconciles the test database with `prisma db push` so the
-suite can run, and prints the drift. Production databases are not
-self-healing. **Fix by writing the missing migration** (`prisma/` is owned by
-the schema/service work, not by the test harness); the drift test goes green on
-its own once that lands.
-
-### 2. Stale assumptions in two pre-existing tests (fixed here)
+### Stale assumptions in a pre-existing test (fixed here)
 
 * `adminOrders.test.ts`'s oversell test assumed two baskets for scarce stock
   could both be *created* and would collide at delivery. Stock reservation moved
@@ -257,7 +217,8 @@ its own once that lands.
 ## CI
 
 `.github/workflows/ci.yml` runs typecheck (`src` and `tests`), lint if a lint
-script exists, and the full suite against an **ephemeral Postgres service
-container** plus a `wsproxy` sidecar. There is no database secret in the
-workflow, and there cannot usefully be one: the guard refuses any URL that is
-not a disposable test database.
+script exists, and the full suite against the Neon `test` branch — its
+connection string lives in the `TEST_DATABASE_URL` repository secret. A
+misconfigured or leaked secret still can't point CI at production: the guard
+refuses any URL that is not a disposable test database, regardless of what the
+secret says.

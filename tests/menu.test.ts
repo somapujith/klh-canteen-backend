@@ -1,22 +1,31 @@
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import request from "supertest";
 import bcrypt from "bcryptjs";
+import crypto from "node:crypto";
 import { signToken } from "../src/lib/jwt.js";
 
-import { describeDb, getTestPrisma, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
+import { describeDb, getTestPool, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
 import { startTestServer, closeTestServer } from "./helpers/app.js";
+import * as userRepo from "../src/db/userRepo.js";
+import * as categoryRepo from "../src/db/categoryRepo.js";
+import { sql, query } from "../src/db/sql.js";
+import type { MenuItem } from "../src/db/schema.js";
 
 // The database is reached ONLY through tests/helpers/db.ts, which refuses to
 // hand out a client until tests/setup/vitest.setup.ts has proved the target is
 // a disposable test database. `describeDb` skips (loudly) when none is
 // configured — it never falls back to .env. See TESTING.md.
-const prisma = testDb.enabled ? getTestPrisma() : (undefined as any);
+const pool = testDb.enabled ? getTestPool() : (undefined as any);
 const server = testDb.enabled ? await startTestServer() : (undefined as any);
 
 async function makeAdminToken() {
   const passwordHash = await bcrypt.hash("x", 12);
-  const admin = await prisma.user.create({
-    data: { role: "ADMIN", email: `admin-${Date.now()}@klh.edu.in`, passwordHash, name: "A" },
+  const admin = await userRepo.insert(pool, {
+    role: "ADMIN",
+    email: `admin-${Date.now()}@klh.edu.in`,
+    passwordHash,
+    name: "A",
+    school: "KLH",
   });
   return signToken({ sub: admin.id, role: "ADMIN" }, process.env.JWT_SECRET!);
 }
@@ -73,21 +82,22 @@ describeDb("Menu CRUD + read", () => {
  */
 describeDb("Menu availability projection", () => {
   async function seedItem(stockQty: number, reservedQty: number, isAvailable = true) {
-    const category = await prisma.category.create({
-      data: { name: `Cat-${Date.now()}-${Math.round(stockQty * 1000 + reservedQty)}`, sortOrder: 0, kitchen: "SNACKS" },
+    const category = await categoryRepo.insertCategory(pool, {
+      name: `Cat-${Date.now()}-${Math.round(stockQty * 1000 + reservedQty)}`,
+      sortOrder: 0,
+      kitchen: "SNACKS",
     });
-    const item = await prisma.menuItem.create({
-      data: {
-        name: "Masala Chai",
-        price: "15.00",
-        imageUrl: "https://example.test/chai.png",
-        stockQty,
-        reservedQty,
-        isAvailable,
-        categoryId: category.id,
-      },
-    });
-    return { category, item };
+    // MenuItemCreateInput always starts at reservedQty=0/isAvailable=true, so
+    // this test's non-default starting state is inserted directly.
+    const { rows } = await query<MenuItem>(
+      pool,
+      sql`
+        INSERT INTO "MenuItem" ("id", "name", "imageUrl", "price", "stockQty", "reservedQty", "isAvailable", "categoryId")
+        VALUES (${crypto.randomUUID()}, 'Masala Chai', 'https://example.test/chai.png', '15.00', ${stockQty}, ${reservedQty}, ${isAvailable}, ${category.id})
+        RETURNING *
+      `,
+    );
+    return { category, item: rows[0] };
   }
 
   function findItem(body: any, id: string) {

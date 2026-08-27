@@ -1,4 +1,5 @@
-import type { PrismaClient, Role } from "@prisma/client";
+import type { Pool } from "@neondatabase/serverless";
+import type { Role } from "./db/schema.js";
 import type { SessionUser } from "./services/authService.js";
 
 /**
@@ -52,8 +53,8 @@ export interface AuthUser {
 
 export interface Variables {
   user?: AuthUser;
-  /** Per-request PrismaClient — see getRequestPrisma() in lib/context.ts. */
-  prisma?: PrismaClient;
+  /** Per-request connection pool — see getRequestPool() in lib/context.ts. */
+  pool?: Pool;
   /**
    * The account row requireAuth() read for this request, memoized so that a
    * route carrying both a router-level and a route-level requireAuth() costs

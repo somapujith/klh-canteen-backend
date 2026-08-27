@@ -1,4 +1,8 @@
-import type { Prisma, PrismaClient } from "@prisma/client";
+import type { Pool } from "@neondatabase/serverless";
+import { sql, raw, query } from "../db/sql.js";
+import type { SqlFragment } from "../db/sql.js";
+import { WhereBuilder } from "../db/where.js";
+import * as userRepo from "../db/userRepo.js";
 import { ApiError } from "../middleware/errorHandler.js";
 import {
   isProtectedAccount,
@@ -76,20 +80,27 @@ export interface CohortSummary {
  * back and reducing in the Worker — this stays O(1) memory as the roster grows
  * across intakes.
  */
-export async function listCohorts(prisma: PrismaClient): Promise<CohortSummary[]> {
-  const rows = await prisma.$queryRaw<
-    { intake: string; total: number; active: number; rollNumberMin: string; rollNumberMax: string }[]
-  >`
-    SELECT left("rollNumber", ${INTAKE_PREFIX_LENGTH}) AS "intake",
-           COUNT(*)::int                               AS "total",
-           COUNT(*) FILTER (WHERE "isActive")::int     AS "active",
-           MIN("rollNumber")                           AS "rollNumberMin",
-           MAX("rollNumber")                           AS "rollNumberMax"
-    FROM "User"
-    WHERE "rollNumber" IS NOT NULL AND "role" = 'STUDENT'
-    GROUP BY 1
-    ORDER BY 1 DESC
-  `;
+export async function listCohorts(pool: Pool): Promise<CohortSummary[]> {
+  const { rows } = await query<{
+    intake: string;
+    total: number;
+    active: number;
+    rollNumberMin: string;
+    rollNumberMax: string;
+  }>(
+    pool,
+    sql`
+      SELECT left("rollNumber", ${INTAKE_PREFIX_LENGTH}) AS "intake",
+             COUNT(*)::int                               AS "total",
+             COUNT(*) FILTER (WHERE "isActive")::int     AS "active",
+             MIN("rollNumber")                           AS "rollNumberMin",
+             MAX("rollNumber")                           AS "rollNumberMax"
+      FROM "User"
+      WHERE "rollNumber" IS NOT NULL AND "role" = 'STUDENT'::"Role"
+      GROUP BY 1
+      ORDER BY 1 DESC
+    `,
+  );
 
   return rows.map((r) => ({ ...r, inactive: r.total - r.active }));
 }
@@ -135,19 +146,22 @@ export interface CohortPromotionResult extends CohortPreview {
   changedUsers: { id: string; rollNumber: string | null; email: string }[];
 }
 
-function studentsWithPrefix(prefix: string): Prisma.UserWhereInput {
-  return { role: "STUDENT", rollNumber: { startsWith: prefix } };
+function studentsWithPrefix(prefix: string): SqlFragment {
+  return new WhereBuilder()
+    .and(`"role" = $1::"Role"`, "STUDENT")
+    .and(`starts_with("rollNumber", $1)`, prefix)
+    .build();
 }
 
-async function loadCohort(prisma: PrismaClient, prefix: string): Promise<CohortMember[]> {
-  const members = await prisma.user.findMany({
-    where: studentsWithPrefix(prefix),
-    select: { id: true, name: true, email: true, rollNumber: true, isActive: true },
-    orderBy: { rollNumber: "asc" },
+async function loadCohort(pool: Pool, prefix: string): Promise<CohortMember[]> {
+  const members = await userRepo.findMany(
+    pool,
+    studentsWithPrefix(prefix),
+    raw('"rollNumber" ASC'),
     // One over the ceiling, so an oversized selection is detected rather than
     // silently truncated into a partial deactivation.
-    take: MAX_COHORT_SIZE + 1,
-  });
+    MAX_COHORT_SIZE + 1,
+  );
 
   if (members.length > MAX_COHORT_SIZE) {
     throw new ApiError(
@@ -189,11 +203,11 @@ function summarise(prefix: string, members: CohortMember[], dryRun: boolean): Co
 
 /** Read-only. Reports exactly what a promotion would change, and writes nothing. */
 export async function previewCohortDeactivation(
-  prisma: PrismaClient,
+  pool: Pool,
   rawPrefix: string,
 ): Promise<CohortPreview> {
   const prefix = assertValidPrefix(rawPrefix);
-  const { targets: _targets, ...preview } = summarise(prefix, await loadCohort(prisma, prefix), true);
+  const { targets: _targets, ...preview } = summarise(prefix, await loadCohort(pool, prefix), true);
   return preview;
 }
 
@@ -208,11 +222,11 @@ export interface PromoteCohortInput {
 }
 
 export async function promoteCohort(
-  prisma: PrismaClient,
+  pool: Pool,
   input: PromoteCohortInput,
 ): Promise<CohortPromotionResult> {
   const prefix = assertValidPrefix(input.prefix);
-  const { targets, ...preview } = summarise(prefix, await loadCohort(prisma, prefix), input.dryRun);
+  const { targets, ...preview } = summarise(prefix, await loadCohort(pool, prefix), input.dryRun);
 
   if (input.dryRun) {
     return { ...preview, applied: false, changed: 0, tokensValidFrom: null, changedUsers: [] };
@@ -237,7 +251,7 @@ export async function promoteCohort(
   }
 
   const result: SetActiveResult = await setUsersActive(
-    prisma,
+    pool,
     targets.map((t) => t.id),
     false,
     input.actorId,

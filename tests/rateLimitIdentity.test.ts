@@ -20,13 +20,14 @@ vi.mock("hono/adapter", async (importOriginal) => {
 
 const { createApp } = await import("../src/app.js");
 const { issueGuestSession } = await import("../src/services/guestSessionService.js");
-const { describeDb, getTestPrisma, resetDatabase, disconnectTestPrisma, testDb } = await import(
+const { describeDb, getTestPool, resetDatabase, disconnectTestPrisma, testDb } = await import(
   "./helpers/db.js"
 );
 const { createStudent, createMenuItem, TEST_PASSWORD } = await import("./helpers/app.js");
 const { FakeRateLimiterHub } = await import("./helpers/fakeRateLimiterHub.js");
+const { sql, query } = await import("../src/db/sql.js");
 
-const prisma = testDb.enabled ? getTestPrisma() : (undefined as any);
+const pool = testDb.enabled ? getTestPool() : (undefined as any);
 const app = createApp();
 
 let hub: InstanceType<typeof FakeRateLimiterHub>;
@@ -46,7 +47,7 @@ function login(identifier: string, password: string) {
   return call("/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ identifier, password }),
+    body: JSON.stringify({ identifier, password, school: "KLH" }),
   });
 }
 
@@ -182,7 +183,8 @@ describeDb('the "reject" strategy still rejects where the key cannot be forged',
     expect((await place(other.token)).status).toBe(201);
 
     // Exactly the orders that were accepted exist.
-    expect(await prisma.order.count()).toBe(6);
+    const { rows } = await query<{ count: string }>(pool, sql`SELECT COUNT(*)::bigint AS count FROM "Order"`);
+    expect(Number(rows[0].count)).toBe(6);
   }, 60_000);
 });
 

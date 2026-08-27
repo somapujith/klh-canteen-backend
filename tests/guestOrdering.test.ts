@@ -6,11 +6,23 @@ import {
   verifyGuestSession,
   GUEST_SESSION_TTL_SECONDS,
 } from "../src/services/guestSessionService.js";
-import { describeDb, getTestPrisma, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
+import { describeDb, getTestPool, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
 import { startTestServer, closeTestServer, createMenuItem, seedOrder, createStudent } from "./helpers/app.js";
+import { sql, query } from "../src/db/sql.js";
+import type { Order } from "../src/db/schema.js";
 
-const prisma = testDb.enabled ? getTestPrisma() : (undefined as any);
+const pool = testDb.enabled ? getTestPool() : (undefined as any);
 const server = testDb.enabled ? await startTestServer() : (undefined as any);
+
+async function findOrder(id: string): Promise<Order | null> {
+  const { rows } = await query<Order>(pool, sql`SELECT * FROM "Order" WHERE "id" = ${id}`);
+  return rows[0] ?? null;
+}
+
+async function countOrders(): Promise<number> {
+  const { rows } = await query<{ count: string }>(pool, sql`SELECT COUNT(*)::bigint AS count FROM "Order"`);
+  return Number(rows[0].count);
+}
 
 const SESSION_HEADER = "X-Guest-Session";
 const SECRET = process.env.QR_TOKEN_SECRET!;
@@ -164,7 +176,7 @@ describeDb("guest session authentication", () => {
       .send({ items: [{ menuItemId: item.id, qty: 1 }] });
 
     expect(res.status).toBe(401);
-    expect(await prisma.order.count()).toBe(0);
+    expect(await countOrders()).toBe(0);
   });
 
   it("accepts the session on the Authorization: Guest <token> form too", async () => {
@@ -273,7 +285,7 @@ describeDb("POST /guest/orders", () => {
     expect(res.body[0].guestSessionId).toBeUndefined();
     expect(res.body[0].token).toBeUndefined();
 
-    const stored = await prisma.order.findUnique({ where: { id: res.body[0].id } });
+    const stored = await findOrder(res.body[0].id);
     expect(stored!.studentId).toBeNull();
     expect(stored!.guestSessionId).toBe(session.sessionId);
     expect(stored!.guestName).toBe("Ana");

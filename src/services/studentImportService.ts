@@ -1,6 +1,7 @@
 import { parse } from "csv-parse/sync";
 import bcrypt from "bcryptjs";
-import type { PrismaClient } from "@prisma/client";
+import type { Pool } from "@neondatabase/serverless";
+import * as userRepo from "../db/userRepo.js";
 
 interface CsvRow {
   name: string;
@@ -16,7 +17,7 @@ interface ImportResult {
   reason?: string;
 }
 
-export async function importStudentsFromCsv(prisma: PrismaClient, csvText: string): Promise<ImportResult[]> {
+export async function importStudentsFromCsv(pool: Pool, csvText: string): Promise<ImportResult[]> {
   const rows: CsvRow[] = parse(csvText, { columns: true, skip_empty_lines: true, trim: true });
   const results: ImportResult[] = [];
 
@@ -29,29 +30,28 @@ export async function importStudentsFromCsv(prisma: PrismaClient, csvText: strin
       continue;
     }
 
-    const existing = await prisma.user.findFirst({
-      where: { OR: [{ rollNumber: row.rollNumber }, { email: row.email }] },
-    });
+    const existing = await userRepo.existsByRollNumberOrEmail(pool, row.rollNumber, row.email);
     if (existing) {
       results.push({ row: rowNum, rollNumber: row.rollNumber, status: "skipped", reason: "duplicate" });
       continue;
     }
 
     const passwordHash = await bcrypt.hash(row.password, 12);
-    await prisma.user.create({
-      data: {
-        role: "STUDENT",
-        name: row.name,
-        rollNumber: row.rollNumber,
-        email: row.email,
-        passwordHash,
-        /**
-         * Same rule as the roster import: an account whose password was chosen
-         * by whoever wrote the CSV is not yet the student's own. They must
-         * replace it before requireAuth() will let them do anything but that.
-         */
-        mustChangePassword: true,
-      },
+    await userRepo.insert(pool, {
+      role: "STUDENT",
+      name: row.name,
+      rollNumber: row.rollNumber,
+      email: row.email,
+      passwordHash,
+      // This importer's CSV shape has no school column — every row it has
+      // ever created is KLH, the DB column's own default.
+      school: "KLH",
+      /**
+       * Same rule as the roster import: an account whose password was chosen
+       * by whoever wrote the CSV is not yet the student's own. They must
+       * replace it before requireAuth() will let them do anything but that.
+       */
+      mustChangePassword: true,
     });
     results.push({ row: rowNum, rollNumber: row.rollNumber, status: "created" });
   }

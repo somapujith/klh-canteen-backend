@@ -3,27 +3,39 @@ import request from "supertest";
 import bcrypt from "bcryptjs";
 import { signToken } from "../src/lib/jwt.js";
 
-import { describeDb, getTestPrisma, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
+import { describeDb, getTestPool, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
 import { startTestServer, closeTestServer } from "./helpers/app.js";
+import * as userRepo from "../src/db/userRepo.js";
+import * as categoryRepo from "../src/db/categoryRepo.js";
+import * as menuItemRepo from "../src/db/menuItemRepo.js";
 
 // The database is reached ONLY through tests/helpers/db.ts, which refuses to
 // hand out a client until tests/setup/vitest.setup.ts has proved the target is
 // a disposable test database. `describeDb` skips (loudly) when none is
 // configured — it never falls back to .env. See TESTING.md.
-const prisma = testDb.enabled ? getTestPrisma() : (undefined as any);
+const pool = testDb.enabled ? getTestPool() : (undefined as any);
 const server = testDb.enabled ? await startTestServer() : (undefined as any);
 
 async function makeStudent() {
   const passwordHash = await bcrypt.hash("x", 12);
-  return prisma.user.create({
-    data: { role: "STUDENT", rollNumber: `R${Date.now()}`, email: `s-${Date.now()}@klh.edu.in`, passwordHash, name: "S" },
+  return userRepo.insert(pool, {
+    role: "STUDENT",
+    rollNumber: `R${Date.now()}`,
+    email: `s-${Date.now()}@klh.edu.in`,
+    passwordHash,
+    name: "S",
+    school: "KLH",
   });
 }
 
 async function makeItem(stockQty = 10) {
-  const category = await prisma.category.create({ data: { name: `Cat-${Date.now()}`, sortOrder: 1 } });
-  return prisma.menuItem.create({
-    data: { name: "Tea", imageUrl: "https://x.com/tea.jpg", price: "10.00", stockQty, categoryId: category.id },
+  const category = await categoryRepo.insertCategory(pool, { name: `Cat-${Date.now()}`, sortOrder: 1, kitchen: "SNACKS" });
+  return menuItemRepo.insertMenuItem(pool, {
+    name: "Tea",
+    imageUrl: "https://x.com/tea.jpg",
+    price: "10.00",
+    stockQty,
+    categoryId: category.id,
   });
 }
 
@@ -54,7 +66,7 @@ describeDb("POST /orders", () => {
     // The opaque row key is not part of the client contract.
     expect(res.body[0].token).toBeUndefined();
 
-    const unchangedItem = await prisma.menuItem.findUnique({ where: { id: item.id } });
+    const unchangedItem = await menuItemRepo.findMenuItemById(pool, item.id);
     expect(unchangedItem?.stockQty).toBe(10);
   });
 

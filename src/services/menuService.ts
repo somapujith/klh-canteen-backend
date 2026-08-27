@@ -1,5 +1,10 @@
-import type { PrismaClient } from "@prisma/client";
+import type { Pool, PoolClient } from "@neondatabase/serverless";
 import { ApiError } from "../middleware/errorHandler.js";
+import * as categoryRepo from "../db/categoryRepo.js";
+import * as menuItemRepo from "../db/menuItemRepo.js";
+import type { Category, Kitchen, MenuItem } from "../db/schema.js";
+
+type Runner = Pool | PoolClient;
 
 /**
  * The menu, from two different points of view.
@@ -26,27 +31,41 @@ import { ApiError } from "../middleware/errorHandler.js";
  * broadcasts, including the `isAvailable` rule: a fully reserved item reads as
  * sold out rather than disappearing, which is what the menu already renders for
  * a zero-stock item.
+ *
+ * Implemented as two queries (categories, then their items) joined in
+ * memory rather than one JOIN — this codebase's own idiom for anything past
+ * a trivial join (see auditLogRepo's doc comment for the one place a single
+ * JOIN was chosen instead, and why).
  */
-export async function getCategorizedMenu(prisma: PrismaClient, kitchen?: string, isAdmin?: boolean) {
-  const where = kitchen ? { kitchen: kitchen as any } : {};
-  const categories = await prisma.category.findMany({
-    where,
-    orderBy: { sortOrder: "asc" },
-    include: {
-      items: {
-        // An admin must see the items they have switched off — hiding one is
-        // reversible only if it is still on the page that hid it.
-        where: isAdmin ? undefined : { isAvailable: true },
-      },
-    },
+export async function getCategorizedMenu(runner: Runner, kitchen?: string, isAdmin?: boolean) {
+  const categories = await categoryRepo.findCategories(runner, kitchen as Kitchen | undefined);
+  const categoryIds = categories.map((c) => c.id);
+  // An admin must see the items they have switched off — hiding one is
+  // reversible only if it is still on the page that hid it.
+  const items = await menuItemRepo.findMenuItemsByCategoryIds(runner, categoryIds, {
+    availableOnly: !isAdmin,
   });
 
-  if (isAdmin) return { categories };
+  const itemsByCategory = new Map<string, MenuItem[]>();
+  for (const item of items) {
+    const bucket = itemsByCategory.get(item.categoryId) ?? [];
+    bucket.push(item);
+    itemsByCategory.set(item.categoryId, bucket);
+  }
+
+  if (isAdmin) {
+    return {
+      categories: categories.map((category) => ({
+        ...category,
+        items: itemsByCategory.get(category.id) ?? [],
+      })),
+    };
+  }
 
   return {
     categories: categories.map((category) => ({
       ...category,
-      items: category.items.map((item) => {
+      items: (itemsByCategory.get(category.id) ?? []).map((item) => {
         const available = Math.max(0, item.stockQty - item.reservedQty);
         return {
           ...item,
@@ -58,35 +77,40 @@ export async function getCategorizedMenu(prisma: PrismaClient, kitchen?: string,
   };
 }
 
-export async function createCategory(prisma: PrismaClient, name: string, sortOrder: number, kitchen: string = "SNACKS") {
-  return prisma.category.create({ data: { name, sortOrder, kitchen: kitchen as any } });
+export async function createCategory(
+  runner: Runner,
+  name: string,
+  sortOrder: number,
+  kitchen: Kitchen | string = "SNACKS"
+): Promise<Category> {
+  return categoryRepo.insertCategory(runner, { name, sortOrder, kitchen: kitchen as Kitchen });
 }
 
 export async function updateCategory(
-  prisma: PrismaClient,
+  runner: Runner,
   id: string,
   data: { name?: string; sortOrder?: number },
   adminKitchen?: string | null
-) {
-  const existing = await prisma.category.findUnique({ where: { id } });
+): Promise<Category> {
+  const existing = await categoryRepo.findCategoryById(runner, id);
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Category not found");
   if (adminKitchen && existing.kitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to modify this category.");
   }
-  return prisma.category.update({ where: { id }, data });
+  return categoryRepo.updateCategory(runner, id, data);
 }
 
-export async function deleteCategory(prisma: PrismaClient, id: string, adminKitchen?: string | null) {
-  const existing = await prisma.category.findUnique({ where: { id } });
+export async function deleteCategory(runner: Runner, id: string, adminKitchen?: string | null): Promise<void> {
+  const existing = await categoryRepo.findCategoryById(runner, id);
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Category not found");
   if (adminKitchen && existing.kitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to delete this category.");
   }
-  return prisma.category.delete({ where: { id } });
+  await categoryRepo.deleteCategory(runner, id);
 }
 
 export async function createMenuItem(
-  prisma: PrismaClient,
+  runner: Runner,
   data: {
     name: string;
     imageUrl: string;
@@ -94,46 +118,44 @@ export async function createMenuItem(
     stockQty: number;
     categoryId: string;
   }
-) {
-  return prisma.menuItem.create({ data });
+): Promise<MenuItem> {
+  return menuItemRepo.insertMenuItem(runner, data);
 }
 
 export async function updateMenuItem(
-  prisma: PrismaClient,
+  runner: Runner,
   id: string,
   data: Partial<{ name: string; imageUrl: string; price: string; stockQty: number; isAvailable: boolean; categoryId: string }>,
   adminKitchen?: string | null
-) {
-  const existing = await prisma.menuItem.findUnique({ where: { id }, include: { category: true } });
+): Promise<MenuItem> {
+  const existing = await menuItemRepo.findMenuItemWithCategoryKitchen(runner, id);
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Menu item not found");
-  if (adminKitchen && existing.category.kitchen !== adminKitchen) {
+  if (adminKitchen && existing.categoryKitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to modify this menu item.");
   }
-  return prisma.menuItem.update({ where: { id }, data });
+  return menuItemRepo.updateMenuItem(runner, id, data);
 }
 
-export async function deleteMenuItem(prisma: PrismaClient, id: string, adminKitchen?: string | null) {
-  const existing = await prisma.menuItem.findUnique({ where: { id }, include: { category: true } });
+export async function deleteMenuItem(runner: Runner, id: string, adminKitchen?: string | null): Promise<void> {
+  const existing = await menuItemRepo.findMenuItemWithCategoryKitchen(runner, id);
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Menu item not found");
-  if (adminKitchen && existing.category.kitchen !== adminKitchen) {
+  if (adminKitchen && existing.categoryKitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to delete this menu item.");
   }
-  return prisma.menuItem.delete({ where: { id } });
+  await menuItemRepo.deleteMenuItem(runner, id);
 }
 
 export async function bulkUpdateCategoryItems(
-  prisma: PrismaClient,
+  runner: Runner,
   categoryId: string,
   data: Partial<{ isAvailable: boolean; stockQty: number }>,
   adminKitchen?: string | null
-) {
-  const category = await prisma.category.findUnique({ where: { id: categoryId } });
+): Promise<{ count: number }> {
+  const category = await categoryRepo.findCategoryById(runner, categoryId);
   if (!category) throw new ApiError(404, "NOT_FOUND", "Category not found");
   if (adminKitchen && category.kitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to modify this category's items.");
   }
-  return prisma.menuItem.updateMany({
-    where: { categoryId },
-    data,
-  });
+  const count = await menuItemRepo.updateMenuItemsByCategory(runner, categoryId, data);
+  return { count };
 }

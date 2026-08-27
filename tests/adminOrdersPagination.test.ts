@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import request from "supertest";
 import { MAX_ORDER_PAGE_SIZE } from "../src/services/orderService.js";
 import { issueGuestSession } from "../src/services/guestSessionService.js";
-import { describeDb, getTestPrisma, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
+import { describeDb, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
 import {
   startTestServer,
   closeTestServer,
@@ -13,7 +13,6 @@ import {
   tokenFor,
 } from "./helpers/app.js";
 
-const prisma = testDb.enabled ? getTestPrisma() : (undefined as any);
 const server = testDb.enabled ? await startTestServer() : (undefined as any);
 
 beforeEach(async () => {

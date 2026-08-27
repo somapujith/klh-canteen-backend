@@ -110,7 +110,7 @@ function emitOrderBoardFullRefresh(env, kitchen?: "SNACKS" | "MEALS", reason?: s
 - **`emitOrderCreated` takes an array.** `createOrder()` splits one cart into one order per kitchen. Pass them all in one call; they are batched into a single request per shard instead of one round-trip each.
 - **`emitOrderStatusChanged` emits two frames from one call** — the kitchen board patch (`ORDER_BOARD_UPDATE`, kitchen-scoped) and the owner's personal notification (`ORDER_UPDATE`, subject-scoped). You do **not** also need `notifyOrderUpdate`.
 - **Stock is only decremented on `DELIVERED`** (`updateOrderStatus`). So the natural place for `emitStockChanged` is the delivery path, alongside `emitOrderStatusChanged` — pass the post-decrement `stockQty` of each affected item.
-- **Never pass a Prisma row straight into `OrderSummary`.** The shapes above are hand-written on purpose so a broadcast cannot leak `passwordHash`, the order `token`, or a guest's phone number.
+- **Never pass a raw DB row straight into `OrderSummary`.** The shapes above are hand-written on purpose so a broadcast cannot leak `passwordHash`, the order `token`, or a guest's phone number.
 
 ### Suggested wiring
 

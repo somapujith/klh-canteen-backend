@@ -8,7 +8,7 @@ import {
   MIN_COHORT_PREFIX_LENGTH,
 } from "../services/cohortService.js";
 import { logAction } from "../services/auditService.js";
-import { getRequestPrisma } from "../lib/context.js";
+import { getRequestPool } from "../lib/context.js";
 import type { AppEnv } from "../types.js";
 
 /**
@@ -44,29 +44,29 @@ const promoteSchema = z.object({
 });
 
 superAdminCohortsRouter.get("/", async (c) => {
-  const prisma = getRequestPrisma(c);
-  return c.json(await listCohorts(prisma));
+  const pool = getRequestPool(c);
+  return c.json(await listCohorts(pool));
 });
 
 superAdminCohortsRouter.post("/preview", async (c) => {
   const { prefix } = previewSchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
-  return c.json(await previewCohortDeactivation(prisma, prefix));
+  const pool = getRequestPool(c);
+  return c.json(await previewCohortDeactivation(pool, prefix));
 });
 
 // GET alias so a preview can be pulled straight from a browser or a link.
 superAdminCohortsRouter.get("/:prefix/preview", async (c) => {
   const prefix = prefixSchema.parse(c.req.param("prefix"));
-  const prisma = getRequestPrisma(c);
-  return c.json(await previewCohortDeactivation(prisma, prefix));
+  const pool = getRequestPool(c);
+  return c.json(await previewCohortDeactivation(pool, prefix));
 });
 
 superAdminCohortsRouter.post("/promote", async (c) => {
   const body = promoteSchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const actor = c.get("user")!;
 
-  const result = await promoteCohort(prisma, {
+  const result = await promoteCohort(pool, {
     prefix: body.prefix,
     actorId: actor.id,
     dryRun: body.dryRun,
@@ -77,7 +77,7 @@ superAdminCohortsRouter.post("/promote", async (c) => {
   // A dry run writes nothing, so it gets no audit entry — logging every
   // preview would bury the entries that record an actual change.
   if (result.applied) {
-    await logAction(prisma, actor.id, "COHORT_DEACTIVATE", "User", undefined, {
+    await logAction(pool, actor.id, "COHORT_DEACTIVATE", "User", undefined, {
       prefix: result.prefix,
       matched: result.matched,
       changed: result.changed,

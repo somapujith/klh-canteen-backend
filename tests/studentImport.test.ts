@@ -3,28 +3,37 @@ import request from "supertest";
 import bcrypt from "bcryptjs";
 import { signToken } from "../src/lib/jwt.js";
 
-import { describeDb, getTestPrisma, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
+import { describeDb, getTestPool, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
 import { startTestServer, closeTestServer } from "./helpers/app.js";
+import * as userRepo from "../src/db/userRepo.js";
+import { sql, query } from "../src/db/sql.js";
 
 // The database is reached ONLY through tests/helpers/db.ts, which refuses to
 // hand out a client until tests/setup/vitest.setup.ts has proved the target is
 // a disposable test database. `describeDb` skips (loudly) when none is
 // configured — it never falls back to .env. See TESTING.md.
-const prisma = testDb.enabled ? getTestPrisma() : (undefined as any);
+const pool = testDb.enabled ? getTestPool() : (undefined as any);
 const server = testDb.enabled ? await startTestServer() : (undefined as any);
+
+async function countStudents(): Promise<number> {
+  const { rows } = await query<{ count: string }>(
+    pool,
+    sql`SELECT COUNT(*)::bigint AS count FROM "User" WHERE "role" = 'STUDENT'::"Role"`,
+  );
+  return Number(rows[0].count);
+}
 
 // Role is read from the database row, not the token (middleware/auth.ts), so
 // the row is what decides whether the gate opens — signing the token with the
 // same role just keeps the fixture honest.
 async function makeToken(role: "ADMIN" | "SUPERADMIN") {
   const passwordHash = await bcrypt.hash("x", 12);
-  const user = await prisma.user.create({
-    data: {
-      role,
-      email: `${role.toLowerCase()}-${Date.now()}-${Math.random()}@klh.edu.in`,
-      passwordHash,
-      name: "A",
-    },
+  const user = await userRepo.insert(pool, {
+    role,
+    email: `${role.toLowerCase()}-${Date.now()}-${Math.random()}@klh.edu.in`,
+    passwordHash,
+    name: "A",
+    school: "KLH",
   });
   return signToken({ sub: user.id, role }, process.env.JWT_SECRET!);
 }
@@ -60,7 +69,7 @@ describeDb("POST /admin/students/bulk", () => {
     expect(res.body.results[1].status).toBe("created");
     expect(res.body.results[2].status).toBe("skipped");
 
-    const count = await prisma.user.count({ where: { role: "STUDENT" } });
+    const count = await countStudents();
     expect(count).toBe(2);
   });
 
@@ -78,7 +87,7 @@ describeDb("POST /admin/students/bulk", () => {
 
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe("FORBIDDEN");
-    expect(await prisma.user.count({ where: { role: "STUDENT" } })).toBe(0);
+    expect(await countStudents()).toBe(0);
   });
 
   it("allows a SUPERADMIN to import", async () => {
@@ -92,6 +101,6 @@ describeDb("POST /admin/students/bulk", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.results[0].status).toBe("created");
-    expect(await prisma.user.count({ where: { role: "STUDENT" } })).toBe(1);
+    expect(await countStudents()).toBe(1);
   });
 });

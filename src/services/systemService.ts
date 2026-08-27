@@ -1,10 +1,14 @@
-import type { PrismaClient } from "@prisma/client";
+import type { Pool } from "@neondatabase/serverless";
+import { sql, query } from "../db/sql.js";
 
-export async function getStorageStats(prisma: PrismaClient) {
-  const query = await prisma.$queryRaw<{ table_name: string; size: bigint }[]>`
-    SELECT relname as table_name, pg_total_relation_size(relid) as size
+export async function getStorageStats(pool: Pool) {
+  const { rows: statsRows } = await query<{ table_name: string; size: string }>(
+    pool,
+    sql`
+    SELECT relname as table_name, pg_total_relation_size(relid)::text as size
     FROM pg_catalog.pg_statio_user_tables;
-  `;
+  `,
+  );
 
   const stats = {
     ordersAndLogs: 0,
@@ -13,7 +17,7 @@ export async function getStorageStats(prisma: PrismaClient) {
     systemOverhead: 0,
   };
 
-  query.forEach((row) => {
+  statsRows.forEach((row) => {
     const size = Number(row.size);
     const table = row.table_name;
 
@@ -40,33 +44,37 @@ export async function getStorageStats(prisma: PrismaClient) {
   };
 }
 
-export async function clearStorage(prisma: PrismaClient, target: string, retainDays: number = 0) {
+export async function clearStorage(pool: Pool, target: string, retainDays: number = 0) {
   if (target === 'orders') {
     // Delete delivered orders older than retainDays
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - retainDays);
 
-    // Find all delivered orders to delete
-    const ordersToDelete = await prisma.order.findMany({
-      where: {
-        status: 'DELIVERED',
-        createdAt: { lt: cutoffDate }
-      },
-      select: { id: true }
-    });
+    // Find all delivered orders to delete. Cast as an ISO-UTC string, not a
+    // raw Date param — a bare Date object serializes using the process's
+    // local wall-clock time for a `timestamp without time zone` column,
+    // silently shifting this comparison by the host's UTC offset.
+    const { rows: ordersToDelete } = await query<{ id: string }>(
+      pool,
+      sql`SELECT "id" FROM "Order" WHERE "status" = 'DELIVERED'::"OrderStatus" AND "createdAt" < ${cutoffDate.toISOString()}::timestamp`,
+    );
 
-    const orderIds = ordersToDelete.map(o => o.id);
+    const orderIds = ordersToDelete.map((o) => o.id);
 
     if (orderIds.length > 0) {
-      // Delete items
-      await prisma.orderItem.deleteMany({
-        where: { orderId: { in: orderIds } }
-      });
-      // Delete orders
-      const deletedOrders = await prisma.order.deleteMany({
-        where: { id: { in: orderIds } }
-      });
-      return { success: true, deletedCount: deletedOrders.count };
+      // Delete items, then orders — two sequential statements, not wrapped in
+      // a transaction, preserving the original findMany + deleteMany +
+      // deleteMany shape. This is a superadmin-only, deliberately manual
+      // cleanup action (not on any hot path), so the small window in which a
+      // crash between the two DELETEs could leave orphaned OrderItem rows for
+      // an already-deleted Order is an acceptable trade against not holding a
+      // transaction/connection open across a batch that can be very large.
+      await query(pool, sql`DELETE FROM "OrderItem" WHERE "orderId" = ANY(${orderIds}::text[])`);
+      const { rowCount: deletedCount } = await query(
+        pool,
+        sql`DELETE FROM "Order" WHERE "id" = ANY(${orderIds}::text[])`,
+      );
+      return { success: true, deletedCount };
     }
     return { success: true, deletedCount: 0 };
   }

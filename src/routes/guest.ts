@@ -11,7 +11,7 @@ import {
 import { issueGuestSession, verifyGuestSession } from "../services/guestSessionService.js";
 import { emitOrderCreated } from "../services/sseService.js";
 import { toOrderSummary } from "../lib/orderSummary.js";
-import { getBindings, getRequestPrisma } from "../lib/context.js";
+import { getBindings, getRequestPool } from "../lib/context.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 import { ApiError } from "../middleware/errorHandler.js";
 import type { AppEnv } from "../types.js";
@@ -140,11 +140,11 @@ const createGuestOrderSchema = z.object({
 
 guestRouter.post("/orders", requireGuestSession, guestOrderLimiter, async (c) => {
   const body = createGuestOrderSchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const bindings = getBindings(c);
   const guestSessionId = c.get("guestSessionId")!;
 
-  const orders = await createOrder(prisma, {
+  const orders = await createOrder(pool, {
     owner: {
       guestSessionId,
       guestName: body.guestName ?? null,
@@ -160,8 +160,8 @@ guestRouter.post("/orders", requireGuestSession, guestOrderLimiter, async (c) =>
 
 /** This session's orders only. Scoped in the WHERE clause, not filtered after. */
 guestRouter.get("/orders", requireGuestSession, async (c) => {
-  const prisma = getRequestPrisma(c);
-  const orders = await getGuestOrders(prisma, c.get("guestSessionId")!);
+  const pool = getRequestPool(c);
+  const orders = await getGuestOrders(pool, c.get("guestSessionId")!);
   return c.json(orders.map(serializeOrder));
 });
 
@@ -179,10 +179,10 @@ guestRouter.get("/collection-windows", requireGuestSession, async (c) => {
     from: c.req.query("from"),
     to: c.req.query("to"),
   });
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const fromDate = from ? new Date(from) : new Date();
   const toDate = to ? new Date(to) : new Date(Date.now() + MAX_PREBOOK_DAYS * 24 * 60 * 60 * 1000);
-  return c.json(await getCollectionWindows(prisma, kitchen, fromDate, toDate));
+  return c.json(await getCollectionWindows(pool, kitchen, fromDate, toDate));
 });
 
 /**
@@ -192,7 +192,7 @@ guestRouter.get("/collection-windows", requireGuestSession, async (c) => {
  */
 guestRouter.get("/orders/:id", requireGuestSession, async (c) => {
   const id = z.string().uuid().parse(c.req.param("id"));
-  const prisma = getRequestPrisma(c);
-  const order = await getOrderForGuest(prisma, id, c.get("guestSessionId")!);
+  const pool = getRequestPool(c);
+  const order = await getOrderForGuest(pool, id, c.get("guestSessionId")!);
   return c.json(serializeOrder(order));
 });

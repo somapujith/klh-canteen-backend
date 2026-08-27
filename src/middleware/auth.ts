@@ -1,7 +1,7 @@
 import type { Context, MiddlewareHandler } from "hono";
-import type { Role } from "@prisma/client";
+import type { Role } from "../db/schema.js";
 import { isTokenRevoked, verifyToken } from "../lib/jwt.js";
-import { getBindings, getRequestPrisma } from "../lib/context.js";
+import { getBindings, getRequestPool } from "../lib/context.js";
 import { loadSessionUser, type SessionUser } from "../services/authService.js";
 import { ApiError } from "./errorHandler.js";
 import type { AppEnv } from "../types.js";
@@ -68,7 +68,7 @@ async function resolveSessionUser(c: Context<AppEnv>, userId: string): Promise<S
   const memo = c.get("sessionUser");
   if (memo && memo.id === userId) return memo;
 
-  const user = await loadSessionUser(getRequestPrisma(c), userId);
+  const user = await loadSessionUser(getRequestPool(c), userId);
   if (user) c.set("sessionUser", user);
   return user;
 }

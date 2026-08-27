@@ -18,12 +18,11 @@
  */
 import { describe, it, expect, beforeEach, afterAll, afterEach } from "vitest";
 
-import { describeDb, getTestPrisma, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
+import { describeDb, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
 import { createApp } from "../src/app.js";
 import { createStudent, createAdmin, createMenuItem, tokenFor } from "./helpers/app.js";
 import { createNodeEventsHub, type NodeEventsHubNamespace } from "../src/services/nodeEventsHub.js";
 
-const prisma = testDb.enabled ? getTestPrisma() : (undefined as any);
 const app = createApp();
 
 let hub: NodeEventsHubNamespace;

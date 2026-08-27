@@ -1,6 +1,6 @@
 /**
  * Per-worker record of whether the guard signed off. tests/helpers/db.ts
- * refuses to hand out a PrismaClient or wipe anything until this is true, so
+ * refuses to hand out a Pool or wipe anything until this is true, so
  * a test file that somehow ran without the setup file cannot reach the
  * database at all.
  */

@@ -12,7 +12,7 @@ import {
 } from "../services/menuService.js";
 import { sseService } from "../services/sseService.js";
 import { logAction } from "../services/auditService.js";
-import { getRequestPrisma, getBindings } from "../lib/context.js";
+import { getRequestPool, getBindings } from "../lib/context.js";
 import type { AppEnv } from "../types.js";
 
 export const adminMenuRouter = new Hono<AppEnv>();
@@ -30,27 +30,27 @@ const idParamSchema = z.string().uuid();
 
 adminMenuRouter.post("/categories", requireAuth("ADMIN"), async (c) => {
   const { name, sortOrder } = categorySchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const category = await createCategory(prisma, name, sortOrder, user.kitchen || "SNACKS");
+  const category = await createCategory(pool, name, sortOrder, user.kitchen || "SNACKS");
   return c.json(category, 201);
 });
 
 adminMenuRouter.patch("/categories/:id", requireAuth("ADMIN"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));
   const data = categorySchema.partial().parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const category = await updateCategory(prisma, id, data, user.kitchen || undefined);
+  const category = await updateCategory(pool, id, data, user.kitchen || undefined);
   return c.json(category);
 });
 
 adminMenuRouter.delete("/categories/:id", requireAuth("ADMIN"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  await deleteCategory(prisma, id, user.kitchen || undefined);
-  await logAction(prisma, user.id, "CATEGORY_DELETE", "Category", id);
+  await deleteCategory(pool, id, user.kitchen || undefined);
+  await logAction(pool, user.id, "CATEGORY_DELETE", "Category", id);
   return c.body(null, 204);
 });
 
@@ -62,18 +62,18 @@ const bulkUpdateSchema = z.object({
 adminMenuRouter.patch("/categories/:id/bulk-items", requireAuth("ADMIN"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));
   const data = bulkUpdateSchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  await bulkUpdateCategoryItems(prisma, id, data, user.kitchen || undefined);
-  await logAction(prisma, user.id, "CATEGORY_BULK_UPDATE", "Category", id, data);
+  await bulkUpdateCategoryItems(pool, id, data, user.kitchen || undefined);
+  await logAction(pool, user.id, "CATEGORY_BULK_UPDATE", "Category", id, data);
   await sseService.broadcastMenuUpdate(getBindings(c));
   return c.json({ success: true });
 });
 
 adminMenuRouter.post("/menu-items", requireAuth("ADMIN"), async (c) => {
   const data = menuItemSchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
-  const item = await createMenuItem(prisma, data);
+  const pool = getRequestPool(c);
+  const item = await createMenuItem(pool, data);
   await sseService.broadcastMenuUpdate(getBindings(c));
   return c.json(item, 201);
 });
@@ -81,19 +81,19 @@ adminMenuRouter.post("/menu-items", requireAuth("ADMIN"), async (c) => {
 adminMenuRouter.patch("/menu-items/:id", requireAuth("ADMIN"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));
   const data = menuItemUpdateSchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const item = await updateMenuItem(prisma, id, data, user.kitchen || undefined);
+  const item = await updateMenuItem(pool, id, data, user.kitchen || undefined);
   await sseService.broadcastMenuUpdate(getBindings(c));
   return c.json(item);
 });
 
 adminMenuRouter.delete("/menu-items/:id", requireAuth("ADMIN"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  await deleteMenuItem(prisma, id, user.kitchen || undefined);
-  await logAction(prisma, user.id, "MENU_ITEM_DELETE", "MenuItem", id);
+  await deleteMenuItem(pool, id, user.kitchen || undefined);
+  await logAction(pool, user.id, "MENU_ITEM_DELETE", "MenuItem", id);
   await sseService.broadcastMenuUpdate(getBindings(c));
   return c.body(null, 204);
 });

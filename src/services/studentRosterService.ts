@@ -1,6 +1,7 @@
 import { parse } from "csv-parse/sync";
 import bcrypt from "bcryptjs";
-import type { PrismaClient } from "@prisma/client";
+import type { Pool } from "@neondatabase/serverless";
+import * as userRepo from "../db/userRepo.js";
 import { ApiError } from "../middleware/errorHandler.js";
 
 /** Fallback when DEFAULT_STUDENT_PASSWORD isn't bound. */
@@ -83,7 +84,7 @@ export function legacyEmailForRollNumber(rollNumber: string): string {
  * re-uploaded roster never silently resets a password a student has changed.
  */
 export async function importStudentRoster(
-  prisma: PrismaClient,
+  pool: Pool,
   csvText: string,
   defaultPassword: string = DEFAULT_STUDENT_PASSWORD
 ): Promise<RosterSummary> {
@@ -127,20 +128,15 @@ export async function importStudentRoster(
     // One lookup for the whole file — a query per row would blow the Worker's
     // CPU/subrequest budget on a 150-student roster.
     const rollNumbers = candidates.map((s) => s.rollNumber);
-    const existing = await prisma.user.findMany({
-      where: {
-        OR: [
-          { rollNumber: { in: rollNumbers } },
-          { email: { in: rollNumbers.map(usernameForRollNumber) } },
-          // Students imported before usernames dropped the domain. Without
-          // this a re-upload would try to create them a second time and be
-          // rejected by the unique index instead of reported as "already
-          // exists". Drop this arm once the backfill has run everywhere.
-          { email: { in: rollNumbers.map(legacyEmailForRollNumber) } },
-        ],
-      },
-      select: { rollNumber: true, email: true },
-    });
+    // Students imported before usernames dropped the domain still need to be
+    // recognised as "already exists" by their legacy email arm. Drop that arm
+    // once the backfill has run everywhere.
+    const existing = await userRepo.findExistingByRollNumbersOrEmails(
+      pool,
+      rollNumbers,
+      rollNumbers.map(usernameForRollNumber),
+      rollNumbers.map(legacyEmailForRollNumber),
+    );
     const takenRolls = new Set(existing.map((u) => u.rollNumber).filter(Boolean) as string[]);
     const takenEmails = new Set(existing.map((u) => u.email));
 
@@ -160,31 +156,28 @@ export async function importStudentRoster(
       // Every student starts on the same password, so hash once instead of
       // once per row — 150 bcrypt rounds would exceed the Worker CPU limit.
       const passwordHash = await bcrypt.hash(defaultPassword, 12);
-      await prisma.user.createMany({
-        data: fresh.map((s) => ({
-          role: "STUDENT" as const,
+      /**
+       * Every student created here shares one password, and their roll
+       * number — the thing they log in with — is printed on a public class
+       * roster. So the account is, on creation, readable by the whole
+       * class. mustChangePassword makes that state transitional: they can
+       * sign in, and the only thing they can do with that session is
+       * replace the shared password. requireAuth() refuses everything else,
+       * ordering included. userRepo.insertStudentsSkipDuplicates() sets it
+       * TRUE unconditionally — set only on rows this import CREATES.
+       * Students already in the table are reported as "already exists" and
+       * are never written to, so a re-uploaded roster cannot flag a cohort
+       * that is already live — see the backfill note in scripts/seedAdmin.ts.
+       */
+      await userRepo.insertStudentsSkipDuplicates(
+        pool,
+        fresh.map((s) => ({
           name: s.name,
           rollNumber: s.rollNumber,
           email: usernameForRollNumber(s.rollNumber),
           passwordHash,
-          /**
-           * Every student created here shares one password, and their roll
-           * number — the thing they log in with — is printed on a public class
-           * roster. So the account is, on creation, readable by the whole
-           * class. The flag makes that state transitional: they can sign in,
-           * and the only thing they can do with that session is replace the
-           * shared password. requireAuth() refuses everything else, ordering
-           * included.
-           *
-           * Set only on rows this import CREATES. Students already in the
-           * table are reported as "already exists" and are never written to,
-           * so a re-uploaded roster cannot flag a cohort that is already
-           * live — see the backfill note in scripts/seedAdmin.ts.
-           */
-          mustChangePassword: true,
         })),
-        skipDuplicates: true,
-      });
+      );
       fresh.forEach((s) => results.push({ ...s, status: "created" }));
     }
   }

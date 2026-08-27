@@ -7,12 +7,10 @@
  * hook ever executes.
  */
 import { resolveTestEnv } from "./testEnv.js";
-import { configureNeonForLocalPostgres } from "./neonLocal.js";
 import { verifyTestDatabaseMarker } from "./marker.js";
 import { markGuardVerified } from "./guardState.js";
 
 const env = resolveTestEnv();
-configureNeonForLocalPostgres(env.target);
 
 if (env.hasDatabase) {
   await verifyTestDatabaseMarker(env.databaseUrl!);

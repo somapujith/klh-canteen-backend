@@ -13,7 +13,7 @@ import { emitOrderSeen, emitOrderStatusChanged, emitStockChanged } from "../serv
 import { notifyStudentOrderTelegram } from "../services/telegramService.js";
 import { guestSubjectIdOrNull } from "../services/guestSessionService.js";
 import { logAction } from "../services/auditService.js";
-import { getBindings, getRequestPrisma } from "../lib/context.js";
+import { getBindings, getRequestPool } from "../lib/context.js";
 import { ApiError } from "../middleware/errorHandler.js";
 import type { AppEnv } from "../types.js";
 
@@ -82,10 +82,10 @@ adminOrdersRouter.get("/", requireAuth("ADMIN"), async (c) => {
     throw new ApiError(400, "INVALID_STATUS", `status must be one or more of ${ORDER_STATUSES.join(", ")}`);
   }
 
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
 
-  const page = await getAllOrders(prisma, {
+  const page = await getAllOrders(pool, {
     kitchen: user.kitchen || undefined,
     statuses,
     includeDelivered,
@@ -113,17 +113,17 @@ adminOrdersRouter.get("/", requireAuth("ADMIN"), async (c) => {
 });
 
 adminOrdersRouter.get("/stats", requireAuth("ADMIN"), async (c) => {
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const stats = await getAdminStats(prisma, user.kitchen || undefined);
+  const stats = await getAdminStats(pool, user.kitchen || undefined);
   return c.json(stats);
 });
 
 adminOrdersRouter.get("/:id", requireAuth("ADMIN"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const order = await openOrderForAdmin(prisma, id, user.id, user.kitchen || undefined);
+  const order = await openOrderForAdmin(pool, id, user.id, user.kitchen || undefined);
   await emitOrderSeen(getBindings(c), {
     orderId: order.id,
     kitchen: order.kitchen,
@@ -136,11 +136,11 @@ adminOrdersRouter.get("/:id", requireAuth("ADMIN"), async (c) => {
 adminOrdersRouter.patch("/:id/status", requireAuth("ADMIN"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));
   const { status } = statusBodySchema.parse(await c.req.json());
-  const prisma = getRequestPrisma(c);
+  const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const order = await updateOrderStatus(prisma, id, status, user.kitchen || undefined);
+  const order = await updateOrderStatus(pool, id, status, user.kitchen || undefined);
   if (!user.kitchen || user.kitchen !== order.kitchen) {
-    await logAction(prisma, user.id, "ORDER_STATUS_OVERRIDE", "Order", order.id, { kitchen: order.kitchen, status });
+    await logAction(pool, user.id, "ORDER_STATUS_OVERRIDE", "Order", order.id, { kitchen: order.kitchen, status });
   }
   const bindings = getBindings(c);
   // One call emits both the kitchen-board patch and the owner's personal
@@ -154,7 +154,7 @@ adminOrdersRouter.patch("/:id/status", requireAuth("ADMIN"), async (c) => {
     deliveredAt: order.deliveredAt,
     subjectId: order.studentId ?? guestSubjectIdOrNull(order.guestSessionId),
   });
-  await notifyStudentOrderTelegram(prisma, bindings, {
+  await notifyStudentOrderTelegram(pool, bindings, {
     studentId: order.studentId,
     orderNumber: order.orderNumber,
     status: order.status,
