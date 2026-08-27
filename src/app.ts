@@ -37,8 +37,25 @@ function resolveAllowedOrigins(raw: string | undefined) {
 export function createApp() {
   const app = new Hono<AppEnv>();
 
-  // Secure HTTP headers (helmet equivalent)
-  app.use("*", secureHeaders());
+  // Secure HTTP headers (helmet equivalent).
+  //
+  // secureHeaders() is the OUTERMOST middleware (registered before every
+  // route is mounted), so its post-`next()` header-setting runs LAST — after
+  // any route handler has already returned. hono/secure-headers sets its
+  // managed headers unconditionally (`ctx.res.headers.set(...)`), which means
+  // a route that sets its own "Cross-Origin-Resource-Policy" (routes/menu.ts's
+  // public image-serving endpoint, loaded cross-origin from the frontend's
+  // <img> tags) would silently have it clobbered back to the "same-origin"
+  // default on every response. crossOriginResourcePolicy is disabled here and
+  // reapplied by the middleware below, which only sets it when a route hasn't
+  // already chosen a value.
+  app.use("*", secureHeaders({ crossOriginResourcePolicy: false }));
+  app.use("*", async (c, next) => {
+    await next();
+    if (!c.res.headers.has("Cross-Origin-Resource-Policy")) {
+      c.res.headers.set("Cross-Origin-Resource-Policy", "same-origin");
+    }
+  });
 
   // Minimal request logging (pino/pino-http replacement — those are
   // Node-only and don't run on Workers). hono/logger is a plain

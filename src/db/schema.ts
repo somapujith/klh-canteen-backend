@@ -45,12 +45,27 @@ export interface Category {
 export interface MenuItem {
   id: string;
   name: string;
-  imageUrl: string;
+  /** Deprecated fallback — pasted-URL images predate uploads. */
+  imageUrl: string | null;
+  /** sha256 of the stored MenuItemImage bytes (32 hex chars), or null. */
+  imageHash: string | null;
   price: string;
   stockQty: number;
   reservedQty: number;
   isAvailable: boolean;
   categoryId: string;
+}
+
+export interface MenuItemImage {
+  menuItemId: string;
+  bytes: Uint8Array;
+  mimeType: "image/webp" | "image/jpeg";
+  byteSize: number;
+  width: number;
+  height: number;
+  /** Nullable: ON DELETE SET NULL when the uploading user is later deleted — see 20260828130000_menu_item_image_uploader_nullable. */
+  uploadedById: string | null;
+  createdAt: Date;
 }
 
 export interface Order {

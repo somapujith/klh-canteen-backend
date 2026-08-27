@@ -3,8 +3,14 @@ import { ApiError } from "../middleware/errorHandler.js";
 import * as categoryRepo from "../db/categoryRepo.js";
 import * as menuItemRepo from "../db/menuItemRepo.js";
 import type { Category, Kitchen, MenuItem } from "../db/schema.js";
+import type { QueryRunner } from "../db/sql.js";
 
-type Runner = Pool | PoolClient;
+// Widened to accept lib/db.ts's HTTP getHttpSql() client alongside Pool/
+// PoolClient. Every function in this file issues exactly one query() call
+// per invocation (no interactive transaction), so this is safe for the
+// write paths too — only the route layer decides which runner to pass, and
+// only routes/menu.ts's read (getCategorizedMenu) actually uses the HTTP one.
+type Runner = Pool | PoolClient | QueryRunner;
 
 /**
  * The menu, from two different points of view.
@@ -113,7 +119,7 @@ export async function createMenuItem(
   runner: Runner,
   data: {
     name: string;
-    imageUrl: string;
+    imageUrl?: string | null;
     price: string;
     stockQty: number;
     categoryId: string;
@@ -125,7 +131,7 @@ export async function createMenuItem(
 export async function updateMenuItem(
   runner: Runner,
   id: string,
-  data: Partial<{ name: string; imageUrl: string; price: string; stockQty: number; isAvailable: boolean; categoryId: string }>,
+  data: Partial<{ name: string; imageUrl: string | null; price: string; stockQty: number; isAvailable: boolean; categoryId: string }>,
   adminKitchen?: string | null
 ): Promise<MenuItem> {
   const existing = await menuItemRepo.findMenuItemWithCategoryKitchen(runner, id);

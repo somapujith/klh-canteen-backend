@@ -2,25 +2,26 @@
  * Raw-SQL data access for the "MenuItem" table, replacing `prisma.menuItem.*`
  * calls in src/services/menuService.ts.
  *
- * `Runner` accepts a `Pool` or a `PoolClient` — nothing here needs a
- * transaction today, matching categoryRepo.ts / userRepo.ts's convention.
+ * `Runner` accepts a `Pool`, a `PoolClient`, or anything else shaped like
+ * `QueryRunner` (src/db/sql.ts) — which includes lib/db.ts's HTTP `getHttpSql()`
+ * client. Nothing here needs a transaction today, matching categoryRepo.ts /
+ * userRepo.ts's convention.
  */
-import crypto from "node:crypto";
 import type { Pool, PoolClient } from "@neondatabase/serverless";
-import { sql, joinSql, raw, query } from "./sql.js";
+import { sql, joinSql, raw, query, type QueryRunner } from "./sql.js";
 import type { SqlFragment } from "./sql.js";
 import { assertAffected } from "./errors.js";
 import type { Kitchen, MenuItem } from "./schema.js";
 
-export type Runner = Pool | PoolClient;
+export type Runner = Pool | PoolClient | QueryRunner;
 
 const ALL_COLUMNS = `
-  "id", "name", "imageUrl", "price", "stockQty", "reservedQty", "isAvailable", "categoryId"
+  "id", "name", "imageUrl", "imageHash", "price", "stockQty", "reservedQty", "isAvailable", "categoryId"
 `;
 
 export interface MenuItemCreateInput {
   name: string;
-  imageUrl: string;
+  imageUrl?: string | null;
   price: string;
   stockQty: number;
   categoryId: string;
@@ -28,7 +29,7 @@ export interface MenuItemCreateInput {
 
 export interface MenuItemUpdateInput {
   name?: string;
-  imageUrl?: string;
+  imageUrl?: string | null;
   price?: string;
   stockQty?: number;
   isAvailable?: boolean;
@@ -80,7 +81,7 @@ export async function findMenuItemWithCategoryKitchen(
   const { rows } = await query<MenuItem & { categoryKitchen: Kitchen }>(
     runner,
     sql`
-      SELECT mi."id", mi."name", mi."imageUrl", mi."price", mi."stockQty", mi."reservedQty",
+      SELECT mi."id", mi."name", mi."imageUrl", mi."imageHash", mi."price", mi."stockQty", mi."reservedQty",
              mi."isAvailable", mi."categoryId", c."kitchen" AS "categoryKitchen"
       FROM "MenuItem" mi
       JOIN "Category" c ON c."id" = mi."categoryId"

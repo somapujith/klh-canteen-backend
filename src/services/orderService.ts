@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import type { Pool, PoolClient } from "@neondatabase/serverless";
 import { sql, joinSql, query } from "../db/sql.js";
 import type { SqlFragment } from "../db/sql.js";
@@ -476,7 +475,8 @@ interface OrderItemJoinRow {
   priceAtOrder: string;
   mi_id: string;
   mi_name: string;
-  mi_imageUrl: string;
+  mi_imageUrl: string | null;
+  mi_imageHash: string | null;
   mi_price: string;
   mi_stockQty: number;
   mi_reservedQty: number;
@@ -508,6 +508,7 @@ async function hydrateOrders<T extends { id: string; studentId: string | null }>
       SELECT oi."id" AS "id", oi."orderId" AS "orderId", oi."menuItemId" AS "menuItemId",
              oi."quantity" AS "quantity", oi."priceAtOrder"::text AS "priceAtOrder",
              mi."id" AS "mi_id", mi."name" AS "mi_name", mi."imageUrl" AS "mi_imageUrl",
+             mi."imageHash" AS "mi_imageHash",
              mi."price"::text AS "mi_price", mi."stockQty" AS "mi_stockQty",
              mi."reservedQty" AS "mi_reservedQty", mi."isAvailable" AS "mi_isAvailable",
              mi."categoryId" AS "mi_categoryId"
@@ -537,6 +538,7 @@ async function hydrateOrders<T extends { id: string; studentId: string | null }>
         id: row.mi_id,
         name: row.mi_name,
         imageUrl: row.mi_imageUrl,
+        imageHash: row.mi_imageHash,
         price: row.mi_price,
         stockQty: row.mi_stockQty,
         reservedQty: row.mi_reservedQty,

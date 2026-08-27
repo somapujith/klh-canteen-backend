@@ -182,7 +182,8 @@ export interface MenuItemSummary {
   price: string;
   stockQty: number;
   isAvailable: boolean;
-  imageUrl?: string;
+  imageUrl?: string | null;
+  imageHash?: string | null;
   categoryId?: string;
   kitchen?: Kitchen;
 }
