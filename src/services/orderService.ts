@@ -1148,45 +1148,64 @@ const NEXT_STATUS: Record<string, string> = {
 };
 
 export async function openOrderForAdmin(pool: Pool, orderId: string, adminId: string, adminKitchen?: string | null) {
-  const { rows } = await query<Order>(pool, sql`SELECT * FROM "Order" WHERE "id" = ${orderId}::text LIMIT 1`);
+  // Read-then-write collapsed into one round trip: every CASE branch that
+  // depends on the row's *current* state (kitchen match, already-seen,
+  // someone else's lock) reads the pre-update column directly, so an
+  // unauthorized or already-current request is a harmless no-op write
+  // instead of skipping the statement — the extra WAL entry is far cheaper
+  // than the round trip a separate SELECT used to cost on every open.
+  //
+  // ISO-UTC string cast to `::timestamp`, not a raw Date param — see the
+  // comment on getCollectionWindows.
+  const nowIso = new Date().toISOString();
+  const authorized = adminKitchen ? sql`"kitchen" = ${adminKitchen}::text` : sql`TRUE`;
+  const lockedByOtherStillValid = sql`
+    "status" <> 'DELIVERED'
+    AND "lockedByAdminId" IS NOT NULL
+    AND "lockedByAdminId" <> ${adminId}::text
+    AND "lockedAt" IS NOT NULL
+    AND ${nowIso}::timestamp - "lockedAt" < interval '5 minutes'
+  `;
+
+  const { rows } = await query<Order>(
+    pool,
+    sql`
+      UPDATE "Order" SET
+        "seenByAdmin" = CASE WHEN (${authorized}) THEN TRUE ELSE "seenByAdmin" END,
+        "seenAt" = CASE
+          WHEN (${authorized}) AND NOT "seenByAdmin" THEN ${nowIso}::timestamp
+          ELSE "seenAt"
+        END,
+        "lockedByAdminId" = CASE
+          WHEN NOT (${authorized}) OR "status" = 'DELIVERED' OR (${lockedByOtherStillValid}) THEN "lockedByAdminId"
+          ELSE ${adminId}::text
+        END,
+        "lockedAt" = CASE
+          WHEN NOT (${authorized}) OR "status" = 'DELIVERED' OR (${lockedByOtherStillValid}) THEN "lockedAt"
+          ELSE ${nowIso}::timestamp
+        END
+      WHERE "id" = ${orderId}::text
+      RETURNING *
+    `,
+  );
   if (rows.length === 0) throw new ApiError(404, "NOT_FOUND", "Order not found");
   const order = rows[0];
   if (adminKitchen && order.kitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", `This order belongs to the ${order.kitchen} kitchen.`);
   }
 
-  let isLockedByOther = false;
-  const now = new Date();
-  if (order.status !== "DELIVERED" && order.lockedByAdminId && order.lockedByAdminId !== adminId && order.lockedAt) {
-    const lockTimeout = 5 * 60 * 1000;
-    if (now.getTime() - order.lockedAt.getTime() < lockTimeout) {
-      isLockedByOther = true;
-    }
-  }
+  // Mirrors lockedByOtherStillValid against the POST-update row: when it was
+  // true, our own UPDATE left lockedByAdminId/lockedAt untouched (still the
+  // other admin's), so re-evaluating in JS against the returned row gives
+  // the same answer the old pre-update check gave.
+  const isLockedByOther =
+    order.status !== "DELIVERED" &&
+    order.lockedByAdminId != null &&
+    order.lockedByAdminId !== adminId &&
+    order.lockedAt != null &&
+    new Date(nowIso).getTime() - order.lockedAt.getTime() < 5 * 60 * 1000;
 
-  // ISO-UTC string cast to `::timestamp`, not a raw Date param — see the
-  // comment on getCollectionWindows.
-  const nowIso = now.toISOString();
-  const sets: SqlFragment[] = [];
-  if (!order.seenByAdmin) {
-    sets.push(sql`"seenByAdmin" = TRUE`);
-    sets.push(sql`"seenAt" = ${nowIso}::timestamp`);
-  }
-  if (!isLockedByOther && order.status !== "DELIVERED") {
-    sets.push(sql`"lockedByAdminId" = ${adminId}::text`);
-    sets.push(sql`"lockedAt" = ${nowIso}::timestamp`);
-  }
-
-  let updatedOrder = order;
-  if (sets.length > 0) {
-    const { rows: updatedRows } = await query<Order>(
-      pool,
-      sql`UPDATE "Order" SET ${joinSql(sets)} WHERE "id" = ${order.id}::text RETURNING *`,
-    );
-    updatedOrder = updatedRows[0];
-  }
-
-  const [hydrated] = await hydrateOrders(pool, [updatedOrder]);
+  const [hydrated] = await hydrateOrders(pool, [order]);
   return { ...withCustomer(hydrated), isLockedByOther };
 }
 

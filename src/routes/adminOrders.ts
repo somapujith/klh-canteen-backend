@@ -124,12 +124,26 @@ adminOrdersRouter.get("/:id", requireAuth("ADMIN"), async (c) => {
   const pool = getRequestPool(c);
   const user = c.get("user")!;
   const order = await openOrderForAdmin(pool, id, user.id, user.kitchen || undefined);
-  await emitOrderSeen(getBindings(c), {
+  // Broadcasting "seen" to the rest of the kitchen board is a side effect for
+  // OTHER admins' screens, not something the clicking admin's own response
+  // depends on. Blocking their response on that Durable Object round-trip
+  // was pure added latency; waitUntil lets it finish after the response is
+  // already on the wire. (Falls back to a blocking await if executionCtx
+  // isn't available, e.g. the Node test harness.)
+  const seenPromise = emitOrderSeen(getBindings(c), {
     orderId: order.id,
     kitchen: order.kitchen,
     seenByAdmin: true,
     lockedByAdminId: user.id,
   });
+  // c.executionCtx is a getter that throws outside Workers (the Node test
+  // harness has none) rather than returning undefined, so this needs a
+  // try/catch rather than optional chaining.
+  try {
+    c.executionCtx.waitUntil(seenPromise);
+  } catch {
+    await seenPromise;
+  }
   return c.json({ ...order, totalAmount: Number(order.totalAmount).toFixed(2) });
 });
 
