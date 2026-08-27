@@ -1,4 +1,5 @@
-import { Pool, types } from "@neondatabase/serverless";
+import { Pool, neon, types } from "@neondatabase/serverless";
+import type { QueryRunner } from "../db/sql.js";
 
 /**
  * Every `DateTime` column in this schema is Postgres `timestamp` (no time
@@ -47,4 +48,49 @@ export function getPool(databaseUrl: string): Pool {
   const pool = createPool(databaseUrl);
   cached = { url: databaseUrl, pool };
   return pool;
+}
+
+/**
+ * HTTP-transport client for single, non-transactional statements — Neon's
+ * documented shape for this workload on edge/serverless runtimes. Unlike
+ * `Pool`, this has no socket to tear down between requests (it rides `fetch`,
+ * which benefits from Cloudflare's edge-to-origin keep-alive), so it is safe
+ * to build once and reuse across every request on every runtime, Workers
+ * included — no per-request handshake, unlike `getPool()` above.
+ *
+ * `fullResults: true` shapes its `.query()` return as `{ rows, rowCount, ... }`,
+ * matching `Pool.query()`'s convention. Returned as a plain `QueryRunner`-
+ * shaped wrapper (not the raw driver function) — TypeScript's structural
+ * check on a generic method rejects the driver's own `.query()` signature
+ * directly, and callers here never need the driver's other surface (the
+ * tagged-template form, `.transaction()`, etc.) anyway.
+ *
+ * Reserved for read-only call sites. Anything that needs a transaction (row
+ * locks, multi-statement atomicity — see orderService.ts's `withTransaction`
+ * users) must keep using `Pool`; the HTTP driver's `.transaction()` runs
+ * queries as a non-interactive batch, not the same guarantee.
+ *
+ * Not used for every read yet — see the type-parser note above: this codebase
+ * registers a custom TIMESTAMP parser on `Pool`'s type registry
+ * (`types.setTypeParser`), and it is unverified whether `neon()`'s HTTP
+ * client shares that same global registry. Confined for now to read paths
+ * whose tables carry no `timestamp` column (menu categories/items), where
+ * the question can't matter either way.
+ */
+let cachedHttpSql: { url: string; runner: QueryRunner } | undefined;
+
+export function getHttpSql(databaseUrl: string): QueryRunner {
+  if (!databaseUrl) throw new Error("DATABASE_URL not set");
+  if (cachedHttpSql && cachedHttpSql.url === databaseUrl) return cachedHttpSql.runner;
+
+  const sql = neon(databaseUrl, { fullResults: true });
+  const runner: QueryRunner = {
+    // The driver's own .query() is generic in the same way Pool.query() is,
+    // but returns Record<string, any>[] under the hood — this cast is the
+    // same "trust the caller's T" contract QueryRunner already makes at its
+    // one other implementation (Pool.query<T>() itself).
+    query: (text, values) => sql.query(text, values as any[]) as any,
+  };
+  cachedHttpSql = { url: databaseUrl, runner };
+  return runner;
 }

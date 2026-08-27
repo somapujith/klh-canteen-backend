@@ -4,18 +4,18 @@
  * to a struct field (see src/db/schema.ts), so functions here return the
  * full row rather than accepting Prisma-style `select` objects.
  *
- * `Runner` accepts a `Pool` or a `PoolClient` — nothing here needs a
- * transaction today, but the wider union matches src/db/sql.ts's
- * `QueryRunner` shape and userRepo.ts's convention.
+ * `Runner` accepts a `Pool`, a `PoolClient`, or anything else shaped like
+ * `QueryRunner` (src/db/sql.ts) — which includes lib/db.ts's HTTP `getHttpSql()`
+ * client. Nothing here needs a transaction today, so read call sites are free
+ * to pass either.
  */
-import crypto from "node:crypto";
 import type { Pool, PoolClient } from "@neondatabase/serverless";
-import { sql, joinSql, raw, query } from "./sql.js";
+import { sql, joinSql, raw, query, type QueryRunner } from "./sql.js";
 import type { SqlFragment } from "./sql.js";
 import { assertAffected } from "./errors.js";
 import type { Category, Kitchen } from "./schema.js";
 
-export type Runner = Pool | PoolClient;
+export type Runner = Pool | PoolClient | QueryRunner;
 
 const ALL_COLUMNS = `"id", "name", "sortOrder", "kitchen"`;
 
