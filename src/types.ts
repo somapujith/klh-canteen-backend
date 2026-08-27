@@ -1,6 +1,7 @@
 import type { Pool } from "@neondatabase/serverless";
 import type { Role } from "./db/schema.js";
 import type { SessionUser } from "./services/authService.js";
+import type { TokenPayload } from "./lib/jwt.js";
 
 /**
  * Cloudflare Workers bindings + secrets, injected per-request via c.env.
@@ -61,6 +62,15 @@ export interface Variables {
    * one lookup rather than two. Also reused by GET /auth/me.
    */
   sessionUser?: SessionUser;
+  /**
+   * Signature/expiry-verified JWT payload for this request, memoized so the
+   * global rate limiter (middleware/rateLimit.ts, which needs the caller's
+   * identity before requireAuth() has run) and requireAuth() itself don't
+   * each verify the same token independently. Same token, same secret, same
+   * request — the second verification was always going to produce an
+   * identical result, just paid for twice.
+   */
+  verifiedJwtPayload?: TokenPayload;
 }
 
 export type AppEnv = { Bindings: Bindings; Variables: Variables };

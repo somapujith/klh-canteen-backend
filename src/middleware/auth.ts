@@ -85,12 +85,19 @@ export function requireAuthWith(options: AuthOptions = {}): MiddlewareHandler<Ap
     // Signature/expiry only. Kept in its own try so that a database problem
     // further down surfaces as a 500 rather than being misreported as a bad
     // token, which would send clients into a pointless re-login loop.
-    let payload;
-    try {
-      const { JWT_SECRET } = getBindings(c);
-      payload = verifyToken(token, JWT_SECRET);
-    } catch {
-      throw new ApiError(401, "INVALID_TOKEN", "Invalid or expired token");
+    //
+    // The global rate limiter (middleware/rateLimit.ts) runs ahead of every
+    // route and already verifies this same token to compute its bucket key —
+    // reuse that result instead of verifying twice per request.
+    let payload = c.get("verifiedJwtPayload");
+    if (!payload) {
+      try {
+        const { JWT_SECRET } = getBindings(c);
+        payload = verifyToken(token, JWT_SECRET);
+        c.set("verifiedJwtPayload", payload);
+      } catch {
+        throw new ApiError(401, "INVALID_TOKEN", "Invalid or expired token");
+      }
     }
 
     const user = await resolveSessionUser(c, payload.sub);

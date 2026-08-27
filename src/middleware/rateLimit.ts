@@ -252,10 +252,17 @@ async function resolveIdentity(
  * context is empty. Verification (rather than a bare decode) matters: an
  * unverified `sub` is attacker-chosen, which would let one caller spread
  * their traffic across unlimited buckets.
+ *
+ * The verified payload is cached on the context (`verifiedJwtPayload`) so
+ * that requireAuth(), which runs right after this on every authenticated
+ * route, doesn't verify the identical token a second time.
  */
 function authenticatedIdentity(c: Context<AppEnv>): string | null {
   const user = c.get("user");
   if (user?.id) return `u:${user.id}`;
+
+  const cached = c.get("verifiedJwtPayload");
+  if (cached) return `u:${cached.sub}`;
 
   const authHeader = c.req.header("Authorization");
   const token = authHeader?.startsWith("Bearer ")
@@ -266,7 +273,9 @@ function authenticatedIdentity(c: Context<AppEnv>): string | null {
   try {
     const { JWT_SECRET } = env<{ JWT_SECRET?: string }>(c);
     if (!JWT_SECRET) return null;
-    return `u:${verifyToken(token, JWT_SECRET).sub}`;
+    const payload = verifyToken(token, JWT_SECRET);
+    c.set("verifiedJwtPayload", payload);
+    return `u:${payload.sub}`;
   } catch {
     return null;
   }
