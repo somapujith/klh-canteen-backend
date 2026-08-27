@@ -1158,7 +1158,7 @@ export async function openOrderForAdmin(pool: Pool, orderId: string, adminId: st
   // ISO-UTC string cast to `::timestamp`, not a raw Date param — see the
   // comment on getCollectionWindows.
   const nowIso = new Date().toISOString();
-  const authorized = adminKitchen ? sql`"kitchen" = ${adminKitchen}::text` : sql`TRUE`;
+  const authorized = adminKitchen ? sql`"kitchen" = ${adminKitchen}::"Kitchen"` : sql`TRUE`;
   const lockedByOtherStillValid = sql`
     "status" <> 'DELIVERED'
     AND "lockedByAdminId" IS NOT NULL

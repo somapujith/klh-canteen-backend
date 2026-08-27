@@ -35,6 +35,19 @@ async function makeAdminToken() {
   return { id: admin.id, token: signToken({ sub: admin.id, role: "ADMIN" }, process.env.JWT_SECRET!) };
 }
 
+async function makeKitchenAdminToken(kitchen: "SNACKS" | "MEALS") {
+  const passwordHash = await bcrypt.hash("x", 12);
+  const admin = await userRepo.insert(pool, {
+    role: "ADMIN",
+    email: `admin-${kitchen}-${Date.now()}-${Math.random()}@klh.edu.in`,
+    passwordHash,
+    name: "A",
+    school: "KLH",
+    kitchen,
+  });
+  return { id: admin.id, token: signToken({ sub: admin.id, role: "ADMIN", kitchen }, process.env.JWT_SECRET!) };
+}
+
 async function makeStudentToken() {
   const passwordHash = await bcrypt.hash("x", 12);
   const student = await userRepo.insert(pool, {
@@ -142,6 +155,51 @@ describeDb("Admin order board", () => {
       const dbOrder = await findOrder(orderId);
       // Lock stays with the first admin; the second admin did not steal it.
       expect(dbOrder?.lockedByAdminId).toBe(adminOne.id);
+    });
+
+    it("opens an order for a kitchen-scoped admin whose kitchen matches", async () => {
+      // Regression: the enum "kitchen" column was compared against a
+      // ::text-cast param and Postgres rejected it outright (500). Only
+      // exercised when the requesting admin actually has a kitchen set —
+      // makeAdminToken() leaves it null, so this needs its own case.
+      const admin = await makeKitchenAdminToken("SNACKS");
+      const studentToken = await makeStudentToken();
+      const item = await makeItem(5);
+
+      const orderRes = await request(server)
+        .post("/orders")
+        .set("Authorization", `Bearer ${studentToken}`)
+        .send({ items: [{ menuItemId: item.id, qty: 1 }] });
+      const { id: orderId } = orderRes.body[0];
+
+      const res = await request(server)
+        .get(`/admin/orders/${orderId}`)
+        .set("Authorization", `Bearer ${admin.token}`);
+      expect(res.status).toBe(200);
+      expect(res.body.id).toBe(orderId);
+    });
+
+    it("refuses a kitchen-scoped admin opening another kitchen's order, without mutating it", async () => {
+      const admin = await makeKitchenAdminToken("MEALS");
+      const studentToken = await makeStudentToken();
+      const item = await makeItem(5); // SNACKS
+
+      const orderRes = await request(server)
+        .post("/orders")
+        .set("Authorization", `Bearer ${studentToken}`)
+        .send({ items: [{ menuItemId: item.id, qty: 1 }] });
+      const { id: orderId } = orderRes.body[0];
+
+      const res = await request(server)
+        .get(`/admin/orders/${orderId}`)
+        .set("Authorization", `Bearer ${admin.token}`);
+      expect(res.status).toBe(403);
+
+      // The no-op-write CASE branches must actually no-op: a rejected admin
+      // must not mark the order seen or claim its lock.
+      const dbOrder = await findOrder(orderId);
+      expect(dbOrder?.seenByAdmin).toBe(false);
+      expect(dbOrder?.lockedByAdminId).toBeNull();
     });
 
     it("rejects non-admin roles with 403", async () => {
