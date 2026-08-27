@@ -21,6 +21,19 @@ import { errorHandler } from "./middleware/errorHandler.js";
 import { rateLimit } from "./middleware/rateLimit.js";
 import type { AppEnv } from "./types.js";
 
+/**
+ * CORS_ORIGIN is "*" or a comma-separated allowlist. hono/cors' `origin`
+ * option takes a string, an array, or a resolver function — a resolver is
+ * the only shape that can echo back whichever allowed origin actually made
+ * the request, which is required once there's more than one.
+ */
+function resolveAllowedOrigins(raw: string | undefined) {
+  const value = raw || "*";
+  if (value === "*") return "*";
+  const allowed = value.split(",").map((o) => o.trim()).filter(Boolean);
+  return (origin: string) => (allowed.includes(origin) ? origin : undefined);
+}
+
 export function createApp() {
   const app = new Hono<AppEnv>();
 
@@ -32,10 +45,12 @@ export function createApp() {
   // console.log-based middleware that works on every runtime.
   app.use("*", logger());
 
-  // Restrict CORS to allowed origin in production
+  // Restrict CORS to allowed origins in production. CORS_ORIGIN is a
+  // comma-separated list (e.g. multiple custom domains for the same
+  // frontend) so we resolve per-request against the caller's Origin header.
   app.use("*", async (c, next) => {
     const { CORS_ORIGIN } = env<{ CORS_ORIGIN?: string }>(c);
-    return cors({ origin: CORS_ORIGIN || "*" })(c, next);
+    return cors({ origin: resolveAllowedOrigins(CORS_ORIGIN) })(c, next);
   });
 
   // Global rate limit: 100 requests per minute per IP
@@ -86,7 +101,10 @@ export function createApp() {
   app.onError(async (err, c) => {
     const res = await errorHandler(err, c);
     const { CORS_ORIGIN } = env<{ CORS_ORIGIN?: string }>(c);
-    res.headers.set("Access-Control-Allow-Origin", CORS_ORIGIN || "*");
+    const resolver = resolveAllowedOrigins(CORS_ORIGIN);
+    const allowed =
+      typeof resolver === "function" ? resolver(c.req.header("Origin") ?? "") : resolver;
+    if (allowed) res.headers.set("Access-Control-Allow-Origin", allowed);
     return res;
   });
 

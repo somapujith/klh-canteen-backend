@@ -9,7 +9,7 @@
   // override per-environment with `wrangler secret put CORS_ORIGIN` isn't
   // needed, but you can still edit this value directly for prod vs staging.
   "vars": {
-    "CORS_ORIGIN": "https://rajasbakery.in",
+    "CORS_ORIGIN": "https://rajasbakery.in,https://www.rajasbakery.in",
     // Arms the forced-password-change gate: a user with
     // User.mustChangePassword is refused by requireAuth() everywhere except
     // the endpoints that let them clear it. Set to "false" ONLY as an
