@@ -174,28 +174,6 @@ function verifySetupToken(jwtSecret: string, setupToken: string): SetupTokenPayl
   return payload;
 }
 
-export interface GoogleKlhStartResult {
-  setupToken: string;
-  /** The Google account's own local-part, offered as a starting point only —
-   *  always editable, never treated as a roll number. */
-  suggestedUsername: string;
-}
-
-export async function startGoogleKlhLogin(
-  jwtSecret: string,
-  googleClientId: string,
-  idToken: string
-): Promise<GoogleKlhStartResult> {
-  const info = await verifyGoogleIdToken(idToken, googleClientId);
-  const email = info.email!;
-  const localPart = email.split("@")[0];
-
-  return {
-    setupToken: signSetupToken(jwtSecret, info.sub, email),
-    suggestedUsername: localPart,
-  };
-}
-
 export interface GoogleKlhCompleteResult {
   token: string;
   role: "STUDENT";
@@ -204,6 +182,65 @@ export interface GoogleKlhCompleteResult {
   id: string;
   school: "KLH";
   mustChangePassword: false;
+}
+
+/** Builds the same session shape completeGoogleKlhLogin returns, for a user
+ *  row that already exists — shared so a returning student's Google
+ *  sign-in and a first-timer's setup both produce an identical session. */
+function buildKlhSession(user: { id: string; role: "STUDENT"; kitchen: string | null; name: string }, jwtSecret: string): GoogleKlhCompleteResult {
+  const token = signToken({ sub: user.id, role: user.role, kitchen: user.kitchen }, jwtSecret);
+  return {
+    token,
+    role: "STUDENT",
+    name: user.name,
+    kitchen: user.kitchen,
+    id: user.id,
+    school: "KLH",
+    mustChangePassword: false,
+  };
+}
+
+/**
+ * Discriminated on `needsSetup`: a Google account with no linked KLH row
+ * gets a setup ticket (first-time flow, below); a Google account that
+ * already completed setup gets logged straight in instead — without this
+ * check every repeat Google sign-in landed back on the setup screen, whose
+ * submit then had nowhere to go but a "username taken"/"already linked"
+ * error, since the account already existed.
+ */
+export type GoogleKlhStartResult =
+  | ({ needsSetup: true; setupToken: string; suggestedUsername: string })
+  | ({ needsSetup: false } & GoogleKlhCompleteResult);
+
+export async function startGoogleKlhLogin(
+  pool: Pool,
+  jwtSecret: string,
+  googleClientId: string,
+  idToken: string
+): Promise<GoogleKlhStartResult> {
+  const info = await verifyGoogleIdToken(idToken, googleClientId);
+  const email = info.email!;
+
+  const existing = await userRepo.findByGoogleId(pool, info.sub);
+  if (existing) {
+    if (existing.school !== "KLH" || existing.role !== "STUDENT") {
+      throw new ApiError(403, "FORBIDDEN", "This Google account is linked to a different login.");
+    }
+    if (!existing.isActive) {
+      throw new ApiError(403, "ACCOUNT_DEACTIVATED", "This account has been deactivated. Contact the canteen office.");
+    }
+    return {
+      needsSetup: false,
+      ...buildKlhSession({ id: existing.id, role: "STUDENT", kitchen: existing.kitchen, name: existing.name }, jwtSecret),
+    };
+  }
+
+  const localPart = email.split("@")[0];
+  return {
+    needsSetup: true,
+    setupToken: signSetupToken(jwtSecret, info.sub, email),
+    suggestedUsername: localPart,
+  };
 }
 
 export async function completeGoogleKlhLogin(
@@ -264,14 +301,5 @@ export async function completeGoogleKlhLogin(
     throw err;
   }
 
-  const token = signToken({ sub: user.id, role: user.role, kitchen: user.kitchen }, jwtSecret);
-  return {
-    token,
-    role: "STUDENT",
-    name: user.name,
-    kitchen: user.kitchen,
-    id: user.id,
-    school: "KLH",
-    mustChangePassword: false,
-  };
+  return buildKlhSession({ id: user.id, role: "STUDENT", kitchen: user.kitchen, name: user.name }, jwtSecret);
 }
