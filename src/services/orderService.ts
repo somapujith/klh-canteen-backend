@@ -484,6 +484,7 @@ interface OrderItemJoinRow {
   mi_isAvailable: boolean;
   mi_isArchived: boolean;
   mi_categoryId: string;
+  mi_sortOrder: number;
 }
 
 /**
@@ -513,7 +514,8 @@ async function hydrateOrders<T extends { id: string; studentId: string | null }>
              mi."imageHash" AS "mi_imageHash",
              mi."price"::text AS "mi_price", mi."stockQty" AS "mi_stockQty",
              mi."reservedQty" AS "mi_reservedQty", mi."isAvailable" AS "mi_isAvailable",
-             mi."isArchived" AS "mi_isArchived", mi."categoryId" AS "mi_categoryId"
+             mi."isArchived" AS "mi_isArchived", mi."categoryId" AS "mi_categoryId",
+             mi."sortOrder" AS "mi_sortOrder"
         FROM "OrderItem" oi
         JOIN "MenuItem" mi ON mi."id" = oi."menuItemId"
        WHERE oi."orderId" = ANY(${orderIds}::text[])
@@ -547,6 +549,7 @@ async function hydrateOrders<T extends { id: string; studentId: string | null }>
         isAvailable: row.mi_isAvailable,
         isArchived: row.mi_isArchived,
         categoryId: row.mi_categoryId,
+        sortOrder: row.mi_sortOrder,
       },
     });
     itemsByOrder.set(row.orderId, bucket);

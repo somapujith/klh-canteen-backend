@@ -31,6 +31,7 @@ const menuItemSchema = z.object({
   price: z.string().regex(/^\d+(\.\d{1,2})?$/),
   stockQty: z.number().int().min(0),
   categoryId: z.string().uuid(),
+  sortOrder: z.number().int().optional(),
 });
 const menuItemUpdateSchema = menuItemSchema.partial();
 const idParamSchema = z.string().uuid();

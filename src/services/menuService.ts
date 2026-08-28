@@ -138,6 +138,7 @@ export async function createMenuItem(
     price: string;
     stockQty: number;
     categoryId: string;
+    sortOrder?: number;
   }
 ): Promise<MenuItem> {
   return menuItemRepo.insertMenuItem(runner, data);
@@ -146,7 +147,7 @@ export async function createMenuItem(
 export async function updateMenuItem(
   runner: Runner,
   id: string,
-  data: Partial<{ name: string; imageUrl: string | null; price: string; stockQty: number; isAvailable: boolean; categoryId: string }>,
+  data: Partial<{ name: string; imageUrl: string | null; price: string; stockQty: number; isAvailable: boolean; categoryId: string; sortOrder: number }>,
   adminKitchen?: string | null
 ): Promise<MenuItem> {
   const existing = await menuItemRepo.findMenuItemWithCategoryKitchen(runner, id);

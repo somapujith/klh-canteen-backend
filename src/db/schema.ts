@@ -71,6 +71,8 @@ export interface MenuItem {
    */
   isArchived: boolean;
   categoryId: string;
+  /** Position within its category, ascending — mirrors Category.sortOrder. */
+  sortOrder: number;
 }
 
 export interface MenuItemImage {

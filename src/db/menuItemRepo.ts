@@ -16,7 +16,7 @@ import type { Kitchen, MenuItem } from "./schema.js";
 export type Runner = Pool | PoolClient | QueryRunner;
 
 const ALL_COLUMNS = `
-  "id", "name", "imageUrl", "imageHash", "price", "stockQty", "reservedQty", "isAvailable", "isArchived", "categoryId"
+  "id", "name", "imageUrl", "imageHash", "price", "stockQty", "reservedQty", "isAvailable", "isArchived", "categoryId", "sortOrder"
 `;
 
 export interface MenuItemCreateInput {
@@ -25,6 +25,7 @@ export interface MenuItemCreateInput {
   price: string;
   stockQty: number;
   categoryId: string;
+  sortOrder?: number;
 }
 
 export interface MenuItemUpdateInput {
@@ -34,6 +35,7 @@ export interface MenuItemUpdateInput {
   stockQty?: number;
   isAvailable?: boolean;
   categoryId?: string;
+  sortOrder?: number;
 }
 
 /**
@@ -59,6 +61,7 @@ export async function findMenuItemsByCategoryIds(
     sql`
       SELECT ${raw(ALL_COLUMNS)} FROM "MenuItem"
       WHERE "categoryId" = ANY(${categoryIds}) AND "isArchived" = false ${availableFilter}
+      ORDER BY "sortOrder" ASC, "id" ASC
     `
   );
   return rows;
@@ -102,8 +105,8 @@ export async function insertMenuItem(runner: Runner, data: MenuItemCreateInput):
   const { rows } = await query<MenuItem>(
     runner,
     sql`
-      INSERT INTO "MenuItem" ("id", "name", "imageUrl", "price", "stockQty", "categoryId")
-      VALUES (${crypto.randomUUID()}, ${data.name}, ${data.imageUrl}, ${data.price}, ${data.stockQty}, ${data.categoryId})
+      INSERT INTO "MenuItem" ("id", "name", "imageUrl", "price", "stockQty", "categoryId", "sortOrder")
+      VALUES (${crypto.randomUUID()}, ${data.name}, ${data.imageUrl}, ${data.price}, ${data.stockQty}, ${data.categoryId}, ${data.sortOrder ?? 0})
       RETURNING ${raw(ALL_COLUMNS)}
     `
   );
@@ -119,6 +122,7 @@ export async function updateMenuItem(runner: Runner, id: string, data: MenuItemU
   if (data.stockQty !== undefined) sets.push(sql`"stockQty" = ${data.stockQty}`);
   if (data.isAvailable !== undefined) sets.push(sql`"isAvailable" = ${data.isAvailable}`);
   if (data.categoryId !== undefined) sets.push(sql`"categoryId" = ${data.categoryId}`);
+  if (data.sortOrder !== undefined) sets.push(sql`"sortOrder" = ${data.sortOrder}`);
 
   if (sets.length === 0) {
     const existing = await findMenuItemById(runner, id);
