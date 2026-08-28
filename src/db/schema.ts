@@ -33,6 +33,11 @@ export interface User {
   telegramLinkedAt: Date | null;
   telegramLinkCode: string | null;
   telegramLinkExpiresAt: Date | null;
+  /** Google's stable `sub` claim. The identity key for Google sign-in — not
+   *  email, which a user can change on their Google account. DRK students only. */
+  googleId: string | null;
+  /** Verified email Google returned at (re-)link time. May drift from `email`. */
+  googleEmail: string | null;
 }
 
 export interface Category {

@@ -38,6 +38,25 @@ export interface Bindings {
   TELEGRAM_BOT_USERNAME?: string;
   /** Optional secret for X-Telegram-Bot-Api-Secret-Token on the webhook. */
   TELEGRAM_WEBHOOK_SECRET?: string;
+  /**
+   * OAuth 2.0 Web client IDs for "Sign in with Google", one per school —
+   * separate GCP projects/consent screens so either can be rotated or
+   * reconfigured without touching the other. Each is checked as the `aud`
+   * claim on that school's Google ID tokens, so a DRK-issued token can never
+   * be replayed against the KLH flow or vice versa.
+   *
+   * Public by design — `aud` is carried by every Google ID token and both
+   * ids ship inside the frontend bundle, so they live in `vars`, not as
+   * `wrangler secret`s. There is no matching client secret binding: the
+   * ID-token flow this app uses never does a server-side code exchange.
+   */
+  GOOGLE_CLIENT_ID_DRK?: string;
+  GOOGLE_CLIENT_ID_KLH?: string;
+  /** Separate OAuth client for the walk-up guest sign-in. Distinct from the
+   *  student clients on purpose: verification checks the ID token's `aud`
+   *  against this value, so a student token cannot be replayed as a guest
+   *  session or vice versa. See services/googleGuestService.ts. */
+  GOOGLE_CLIENT_ID_GUEST?: string;
 }
 
 export interface AuthUser {

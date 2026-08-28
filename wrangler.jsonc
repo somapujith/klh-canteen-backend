@@ -16,7 +16,16 @@
     // emergency escape hatch — chiefly if the offline load-testing harness
     // ever finds itself holding tokens for flagged accounts — since it
     // disarms the gate for every account at once.
-    "ENFORCE_PASSWORD_CHANGE": "true"
+    "ENFORCE_PASSWORD_CHANGE": "true",
+    // Public OAuth Web client IDs for "Sign in with Google", one per school —
+    // separate GCP projects so either can be rotated independently. Safe
+    // alongside CORS_ORIGIN since both ship inside the frontend bundle anyway.
+    "GOOGLE_CLIENT_ID_DRK": "507951128349-cm98276rmlkb7a399jphh22q5pfen5jb.apps.googleusercontent.com",
+    "GOOGLE_CLIENT_ID_KLH": "727192692226-8ediihrs6go72ltd20mlrh4kgu8daioq.apps.googleusercontent.com",
+    // Walk-up guest sign-in. A THIRD OAuth client, separate from the two
+    // student ones above: the ID token's `aud` is checked against this value,
+    // which is what stops a student token being replayed as a guest session.
+    "GOOGLE_CLIENT_ID_GUEST": "507951128349-7i31je511nega9ruvngftgvpa58rav4c.apps.googleusercontent.com"
   },
 
   // Sensitive values are NOT set here. Before first deploy, run:

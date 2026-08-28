@@ -7,6 +7,8 @@ import {
   logoutEverywhere,
   adminResetPassword,
 } from "../services/authService.js";
+import { loginWithGoogle, startGoogleKlhLogin, completeGoogleKlhLogin } from "../services/googleAuthService.js";
+import { ApiError } from "../middleware/errorHandler.js";
 import { MIN_PASSWORD_LENGTH, MAX_PASSWORD_BYTES } from "../services/passwordPolicy.js";
 import { logAction } from "../services/auditService.js";
 import { requireAuth, requireAuthAllowPasswordChange } from "../middleware/auth.js";
@@ -31,10 +33,26 @@ const CHANGE_PASSWORD_LIMIT_PREFIX = "change-password";
  * The flip side of a campus-ID key is that the key is attacker-suppliable:
  * anyone can post a victim's roll number with a wrong password. So this limit
  * MUST NOT be able to refuse a request. It uses progressive delay instead —
- * 5 free attempts per 15 minutes, then 250ms / 500ms / 1s / 2s / 3s (capped)
- * before the response. Guessing at scale becomes hopeless; a student who
- * fumbles their password still gets in, just a few seconds later. There is no
- * attempt count at which a correct password stops working.
+ * 5 free attempts per 15 minutes, then a doubling delay before the response.
+ * Guessing at scale becomes hopeless; a student who fumbles their password
+ * still gets in, just a few seconds later. There is no attempt count at which
+ * a correct password stops working.
+ *
+ * WHY NOT A HARD LOCKOUT AFTER N ATTEMPTS. It was considered and deliberately
+ * rejected: because the key is the roll number, and roll numbers are printed
+ * on the class roster, a lockout tier would let anyone disable any student's
+ * account on demand — repeatedly, and at the exact moment it matters most.
+ * The delay curve below is the lockout's replacement, and is tuned to be
+ * *stricter* than a 2-minute lock past attempt 13 while still always serving
+ * a correct password:
+ *
+ *   attempts 1-5    no delay      (a normal fumbling student never feels this)
+ *   attempt  10     4s            (~8s spent in total)
+ *   attempt  12     16s
+ *   attempt  13+    30s (capped)  -> 2 attempts/minute, sustained
+ *
+ * A 2-minute lockout would let a guesser resume at full speed afterwards; the
+ * cap here never lifts while they keep trying, so the sustained rate is lower.
  */
 const loginLimiter = rateLimit({
   prefix: LOGIN_LIMIT_PREFIX,
@@ -43,7 +61,9 @@ const loginLimiter = rateLimit({
   strategy: "progressive-delay",
   delay: {
     baseMs: 250,
-    maxMs: 3_000,
+    // Raised from 3s. At 3s a guesser still got 20 attempts/minute; 30s puts
+    // the sustained ceiling at 2/minute.
+    maxMs: 30_000,
     // A challenge would become the next friction tier past this many attempts.
     // Inert until a provider is configured — see ProgressiveDelayOptions
     // .onChallengeRequired in src/middleware/rateLimit.ts.
@@ -61,13 +81,18 @@ const loginLimiter = rateLimit({
  * and for the same reason: progressive delay, never refusal. A student who is
  * fumbling their own current password while trying to replace it is the last
  * person who should be locked out.
+ *
+ * Same 30s ceiling as login. This key is the authenticated user id rather than
+ * a public roll number, so it is not attacker-suppliable the way login's is —
+ * but it still guesses a password, so it gets the same sustained ceiling
+ * rather than the old 3s one.
  */
 const changePasswordLimiter = rateLimit({
   prefix: CHANGE_PASSWORD_LIMIT_PREFIX,
   windowSeconds: 15 * 60,
   max: 5,
   strategy: "progressive-delay",
-  delay: { baseMs: 250, maxMs: 3_000 },
+  delay: { baseMs: 250, maxMs: 30_000 },
   code: "TOO_MANY_ATTEMPTS",
   message: "Too many attempts, please try again later.",
 });
@@ -103,6 +128,65 @@ authRouter.post("/login", loginLimiter, async (c) => {
   // a few times isn't still paying delay on their next login.
   await resetRateLimit(c, LOGIN_LIMIT_PREFIX, normalizeIdentifier(identifier));
 
+  return c.json(result);
+});
+
+const googleLoginSchema = z.object({ idToken: z.string().min(1) });
+
+/**
+ * "Sign in with Google" — DRK students only. No campus-ID body field to key
+ * a progressive-delay limiter on (unlike /login), so this rides the global
+ * per-IP rate limit in app.ts; the endpoint verifies against Google itself
+ * before ever touching the database, which is the expensive/abusable step.
+ */
+authRouter.post("/login/google", async (c) => {
+  const { idToken } = googleLoginSchema.parse(await c.req.json());
+  const pool = getRequestPool(c);
+  const { JWT_SECRET, GOOGLE_CLIENT_ID_DRK } = getBindings(c);
+  if (!GOOGLE_CLIENT_ID_DRK) {
+    throw new ApiError(503, "GOOGLE_NOT_CONFIGURED", "Google sign-in is not configured.");
+  }
+  const result = await loginWithGoogle(pool, JWT_SECRET, GOOGLE_CLIENT_ID_DRK, idToken);
+  return c.json(result);
+});
+
+/**
+ * "Sign in with Google" — KLH students, phase 1 of 2. Verifies the Google
+ * identity (must be @klh.edu.in) and hands back a short-lived setup ticket
+ * plus a suggested username — no session, no database write yet. The
+ * account is only created/updated once /login/google/klh/complete runs,
+ * which happens unconditionally on every first-time Google sign-in (see
+ * googleAuthService.ts's module doc for why KLH can't reuse DRK's
+ * single-call flow).
+ */
+authRouter.post("/login/google/klh/start", async (c) => {
+  const { idToken } = googleLoginSchema.parse(await c.req.json());
+  const pool = getRequestPool(c);
+  const { JWT_SECRET, GOOGLE_CLIENT_ID_KLH } = getBindings(c);
+  if (!GOOGLE_CLIENT_ID_KLH) {
+    throw new ApiError(503, "GOOGLE_NOT_CONFIGURED", "Google sign-in is not configured.");
+  }
+  const result = await startGoogleKlhLogin(pool, JWT_SECRET, GOOGLE_CLIENT_ID_KLH, idToken);
+  return c.json(result);
+});
+
+const googleKlhCompleteSchema = z.object({
+  setupToken: z.string().min(1),
+  username: z.string().min(1),
+  password: z.string().min(1),
+});
+
+/**
+ * "Sign in with Google" — KLH students, phase 2 of 2. Confirms/edits the
+ * username and sets a password, finalising the account this setupToken was
+ * issued for. Reuses the same progressive-delay limiter as password login —
+ * this is also a place someone could hammer a chosen username against.
+ */
+authRouter.post("/login/google/klh/complete", changePasswordLimiter, async (c) => {
+  const { setupToken, username, password } = googleKlhCompleteSchema.parse(await c.req.json());
+  const pool = getRequestPool(c);
+  const { JWT_SECRET } = getBindings(c);
+  const result = await completeGoogleKlhLogin(pool, JWT_SECRET, setupToken, username, password);
   return c.json(result);
 });
 

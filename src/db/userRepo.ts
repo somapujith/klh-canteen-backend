@@ -35,7 +35,7 @@ const ALL_COLUMNS = raw(`
   "id", "role", "rollNumber", "email", "passwordHash", "name", "kitchen", "school",
   "createdAt", "mustChangePassword", "isActive", "tokensValidFrom",
   "telegramChatId", "telegramUsername", "telegramLinkedAt",
-  "telegramLinkCode", "telegramLinkExpiresAt"
+  "telegramLinkCode", "telegramLinkExpiresAt", "googleId", "googleEmail"
 `);
 
 // ---------------------------------------------------------------------------
@@ -121,6 +121,15 @@ export async function findStudentByTelegramLinkCode(
       WHERE "role" = 'STUDENT'::"Role" AND "telegramLinkCode" = ${code} AND "telegramLinkExpiresAt" > now()
       LIMIT 1
     `,
+  );
+  return rows[0] ?? null;
+}
+
+/** googleAuthService's identity lookup — googleId is the stable key, not email. */
+export async function findByGoogleId(runner: Runner, googleId: string): Promise<User | null> {
+  const { rows } = await query<User>(
+    runner,
+    sql`SELECT ${ALL_COLUMNS} FROM "User" WHERE "googleId" = ${googleId} LIMIT 1`,
   );
   return rows[0] ?? null;
 }
@@ -215,22 +224,25 @@ export interface InsertUserInput {
   kitchen?: Kitchen | null;
   school: School;
   mustChangePassword?: boolean;
+  googleId?: string | null;
+  googleEmail?: string | null;
 }
 
 /**
  * General-purpose create. Lets a unique-violation on `email` (or the
- * `rollNumber`/`telegramChatId` unique indexes) propagate — callers map it
- * with `isUniqueViolation()`.
+ * `rollNumber`/`telegramChatId`/`googleId` unique indexes) propagate —
+ * callers map it with `isUniqueViolation()`.
  */
 export async function insert(runner: Runner, data: InsertUserInput): Promise<User> {
   const id = crypto.randomUUID();
   const { rows } = await query<User>(
     runner,
     sql`
-      INSERT INTO "User" ("id", "role", "name", "email", "passwordHash", "rollNumber", "kitchen", "school", "mustChangePassword")
+      INSERT INTO "User" ("id", "role", "name", "email", "passwordHash", "rollNumber", "kitchen", "school", "mustChangePassword", "googleId", "googleEmail")
       VALUES (
         ${id}, ${data.role}::"Role", ${data.name}, ${data.email}, ${data.passwordHash},
-        ${data.rollNumber ?? null}, ${data.kitchen ?? null}::"Kitchen", ${data.school}::"School", ${data.mustChangePassword ?? false}
+        ${data.rollNumber ?? null}, ${data.kitchen ?? null}::"Kitchen", ${data.school}::"School", ${data.mustChangePassword ?? false},
+        ${data.googleId ?? null}, ${data.googleEmail ?? null}
       )
       RETURNING ${ALL_COLUMNS}
     `,

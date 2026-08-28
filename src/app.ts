@@ -70,7 +70,11 @@ export function createApp() {
     return cors({ origin: resolveAllowedOrigins(CORS_ORIGIN) })(c, next);
   });
 
-  // Global rate limit: 100 requests per minute per IP
+  // Global rate limit: 100 requests per minute per identity (the JWT subject).
+  // NOT per IP — middleware/rateLimit.ts deliberately has no IP keying at all,
+  // because campus WiFi NATs the whole student body behind one address. An
+  // anonymous request derives no identity and is skipped here; edge volumetric
+  // protection is Cloudflare WAF's job.
   app.use(
     "*",
     rateLimit({

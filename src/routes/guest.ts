@@ -9,6 +9,7 @@ import {
   MAX_PREBOOK_DAYS,
 } from "../services/orderService.js";
 import { issueGuestSession, verifyGuestSession } from "../services/guestSessionService.js";
+import { loginGuestWithGoogle } from "../services/googleGuestService.js";
 import { emitOrderCreated } from "../services/sseService.js";
 import { toOrderSummary } from "../lib/orderSummary.js";
 import { getBindings, getRequestPool } from "../lib/context.js";
@@ -88,6 +89,48 @@ const guestOrderLimiter = rateLimit({
   message: "Too many orders placed, please wait a minute.",
 });
 
+const googleGuestSchema = z.object({ idToken: z.string().min(1) });
+
+/**
+ * Guards the Google guest sign-in, which unlike the anonymous mint does real
+ * work per call (an outbound fetch to Google's tokeninfo endpoint).
+ *
+ * Keyed on a hash of the submitted ID token, because that is the only stable
+ * thing available before verification — there is no session and no account
+ * yet. That makes the key attacker-suppliable in principle, but it is only
+ * ever their OWN token: replaying one token repeatedly throttles that token
+ * and nothing else, and it cannot be used to lock a victim out of signing in,
+ * since a different person's sign-in carries a different token. "reject" is
+ * therefore safe here.
+ *
+ * The window is generous: a guest legitimately re-signs-in whenever their
+ * session expires, and Google's own button may hand back the same token twice
+ * during a retry.
+ */
+const googleSessionLimiter = rateLimit({
+  prefix: "guest-google",
+  windowSeconds: 60,
+  max: 10,
+  keyFn: async (c) => {
+    try {
+      const body = googleGuestSchema.safeParse(await c.req.json());
+      if (!body.success) return null;
+      // Hashed rather than raw: the key is used to name a Durable Object, and
+      // an ID token is a credential that should not be spelled into an
+      // object name or anything that logs one.
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(body.data.idToken)
+      );
+      return `t:${[...new Uint8Array(digest).slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+    } catch {
+      return null;
+    }
+  },
+  code: "TOO_MANY_REQUESTS",
+  message: "Too many sign-in attempts, please wait a minute.",
+});
+
 // Prisma's Decimal.toJSON() drops trailing zeros ("20.00" -> "20"). Match the
 // student routes and pin money to a fixed 2-decimal string at the boundary.
 function serializeOrder<T extends { totalAmount: unknown; items: { priceAtOrder: unknown }[] }>(order: T) {
@@ -127,6 +170,30 @@ guestRouter.post("/session", async (c) => {
     },
     201,
   );
+});
+
+/**
+ * Mints a guest session tied to a Google identity, so the ticket survives a
+ * cleared cache, a closed tab, or a different device.
+ *
+ * Still a GUEST session in every respect — no User row is created, no
+ * privilege is granted, and the returned token reads exactly the same rows an
+ * anonymous one would. The only difference is that its session id is derived
+ * from the Google subject and is therefore the same on every sign-in.
+ *
+ * Unauthenticated by necessity (this IS the sign-in), but unlike the
+ * anonymous mint it does real work per call — a fetch to Google — so it is
+ * rate limited. The limiter keys on the submitted ID token rather than an
+ * identity, which is the only thing available before verification.
+ */
+guestRouter.post("/session/google", googleSessionLimiter, async (c) => {
+  const { idToken } = googleGuestSchema.parse(await c.req.json());
+  const { QR_TOKEN_SECRET, GOOGLE_CLIENT_ID_GUEST } = getBindings(c);
+  if (!GOOGLE_CLIENT_ID_GUEST) {
+    throw new ApiError(503, "GOOGLE_NOT_CONFIGURED", "Google sign-in is not configured.");
+  }
+  const result = await loginGuestWithGoogle(GOOGLE_CLIENT_ID_GUEST, QR_TOKEN_SECRET, idToken);
+  return c.json({ ...result, header: GUEST_SESSION_HEADER }, 201);
 });
 
 const createGuestOrderSchema = z.object({

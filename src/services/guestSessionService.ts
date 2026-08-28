@@ -45,7 +45,50 @@ export interface GuestSession {
 
 export function issueGuestSession(secret: string): GuestSession {
   if (!secret) throw new Error("QR_TOKEN_SECRET not set");
-  const sessionId = crypto.randomUUID();
+  return issueGuestSessionForId(crypto.randomUUID(), secret);
+}
+
+/**
+ * The stable session id for a Google-verified guest.
+ *
+ * A walk-up guest's session id is a random UUID, so a new one is minted every
+ * time storage is lost and their pending orders become unreachable — the
+ * order is still real and still cooking, but the only key that could read it
+ * back is gone. Deriving the id from the Google subject instead makes it the
+ * SAME id on every sign-in, so the same person recovers the same tickets on a
+ * new device, in a private window, or after clearing site data.
+ *
+ * HMAC rather than the raw `sub`, for two reasons: the id is written to
+ * `Order.guestSessionId` and broadcast as a realtime subject, so a raw Google
+ * subject would be leaking a stable cross-service user identifier into rows
+ * and frames; and keying it to QR_TOKEN_SECRET means the mapping cannot be
+ * recomputed by anyone who merely learns a `sub`.
+ *
+ * Prefixed `g:` so it can never collide with the `crypto.randomUUID()` shape
+ * an anonymous session uses — the two namespaces stay disjoint even though
+ * both flow through the same column.
+ */
+export function googleGuestSessionId(googleSub: string, secret: string): string {
+  if (!secret) throw new Error("QR_TOKEN_SECRET not set");
+  const digest = crypto
+    .createHmac("sha256", secret)
+    .update(`${MAGIC_PREFIX}.google.${googleSub}`)
+    .digest("hex");
+  // 32 hex chars is the same entropy a UUID carries; the full 64 would only
+  // make the realtime subject and the stored column longer.
+  return `g:${digest.slice(0, 32)}`;
+}
+
+/**
+ * Mints a session token for an id the caller has already decided on.
+ *
+ * Split out so the Google flow can issue a token over its stable, derived id
+ * while the anonymous flow keeps minting random ones. The signing, TTL and
+ * wire format are identical either way — a verifier cannot tell the two
+ * apart, and deliberately does not need to.
+ */
+export function issueGuestSessionForId(sessionId: string, secret: string): GuestSession {
+  if (!secret) throw new Error("QR_TOKEN_SECRET not set");
   const issuedAt = Math.floor(Date.now() / 1000);
   const sig = sign(sessionId, issuedAt, secret);
   const payload = `${MAGIC_PREFIX}.${sessionId}.${issuedAt}.${sig}`;
