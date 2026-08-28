@@ -152,21 +152,20 @@ authRouter.post("/login/google", async (c) => {
 
 /**
  * "Sign in with Google" — KLH students, phase 1 of 2. Verifies the Google
- * identity (must be @klh.edu.in) and hands back a short-lived setup ticket
- * plus a suggested username — no session, no database write yet. The
- * account is only created/updated once /login/google/klh/complete runs,
- * which happens unconditionally on every first-time Google sign-in (see
- * googleAuthService.ts's module doc for why KLH can't reuse DRK's
- * single-call flow).
+ * identity (any account — no domain restriction, and note this uses
+ * GOOGLE_CLIENT_ID_GUEST, the same client the walk-up guest flow uses, not
+ * a KLH-institutional one) and hands back a short-lived setup ticket plus a
+ * suggested username — no session, no database write yet. The account is
+ * only created once /login/google/klh/complete runs, always as a brand new
+ * account (see googleAuthService.ts's module doc).
  */
 authRouter.post("/login/google/klh/start", async (c) => {
   const { idToken } = googleLoginSchema.parse(await c.req.json());
-  const pool = getRequestPool(c);
-  const { JWT_SECRET, GOOGLE_CLIENT_ID_KLH } = getBindings(c);
-  if (!GOOGLE_CLIENT_ID_KLH) {
+  const { JWT_SECRET, GOOGLE_CLIENT_ID_GUEST } = getBindings(c);
+  if (!GOOGLE_CLIENT_ID_GUEST) {
     throw new ApiError(503, "GOOGLE_NOT_CONFIGURED", "Google sign-in is not configured.");
   }
-  const result = await startGoogleKlhLogin(pool, JWT_SECRET, GOOGLE_CLIENT_ID_KLH, idToken);
+  const result = await startGoogleKlhLogin(JWT_SECRET, GOOGLE_CLIENT_ID_GUEST, idToken);
   return c.json(result);
 });
 

@@ -136,16 +136,14 @@ export async function loginWithGoogle(
 // ---------------------------------------------------------------------------
 // KLH students — two-phase flow
 //
-// KLH's User.email holds the bare roll number (studentRosterService.ts), not
-// a real address, so a Google email can never match it the way DRK's
-// find-by-email fallback does. Instead: verify the klh.edu.in Google
-// identity, derive a candidate username from it, and hand the client a
-// short-lived setup ticket. The account (new or existing) is only written
-// once the student has confirmed/typed a username and set a password —
-// unconditionally, every first-time Google sign-in, per product spec.
+// Any verified Google account may start this flow (no klh.edu.in domain
+// requirement — this uses the same GOOGLE_CLIENT_ID_GUEST client as guest
+// sign-in, not a KLH-institutional one). Because the Google identity carries
+// no roll number to infer anything from, the account is always brand new:
+// the student picks their own username and password on the setup screen,
+// and that becomes their login going forward (username+password OR Google).
 // ---------------------------------------------------------------------------
 
-const KLH_EMAIL_DOMAIN = "klh.edu.in";
 /** Distinct `aud` so this ticket can never be presented to a normal
  *  auth-required endpoint — verifyToken()'s callers never check `aud`, so a
  *  reused JWT_SECRET alone would not stop that. */
@@ -176,51 +174,25 @@ function verifySetupToken(jwtSecret: string, setupToken: string): SetupTokenPayl
   return payload;
 }
 
-/** The digit run at the start of a roll-number-style local-part, or null for
- *  a name-based address (e.g. "priya.rao@klh.edu.in"). */
-function extractRollNumber(localPart: string): string | null {
-  const match = localPart.match(/^\d+/);
-  return match ? match[0] : null;
-}
-
 export interface GoogleKlhStartResult {
   setupToken: string;
+  /** The Google account's own local-part, offered as a starting point only —
+   *  always editable, never treated as a roll number. */
   suggestedUsername: string;
-  usernameEditable: boolean;
-  accountExists: boolean;
 }
 
 export async function startGoogleKlhLogin(
-  pool: Pool,
   jwtSecret: string,
   googleClientId: string,
   idToken: string
 ): Promise<GoogleKlhStartResult> {
   const info = await verifyGoogleIdToken(idToken, googleClientId);
   const email = info.email!;
-  const [localPart, domain] = email.split("@");
-
-  if (domain?.toLowerCase() !== KLH_EMAIL_DOMAIN) {
-    throw new ApiError(
-      403,
-      "INVALID_DOMAIN",
-      `Google sign-in for KLH requires a ${KLH_EMAIL_DOMAIN} account.`
-    );
-  }
-
-  const rollNumber = extractRollNumber(localPart);
-  const suggestedUsername = rollNumber ?? localPart;
-  const usernameEditable = rollNumber === null;
-
-  const existing = await userRepo.findFirstByEmailOrRollNumber(pool, suggestedUsername, {
-    role: "STUDENT",
-  });
+  const localPart = email.split("@")[0];
 
   return {
     setupToken: signSetupToken(jwtSecret, info.sub, email),
-    suggestedUsername,
-    usernameEditable,
-    accountExists: existing !== null && existing.school === "KLH",
+    suggestedUsername: localPart,
   };
 }
 
@@ -247,54 +219,36 @@ export async function completeGoogleKlhLogin(
   if (!trimmedUsername) {
     throw new ApiError(400, "MISSING_USERNAME", "Username is required.");
   }
-  assertPasswordStrength(password, { rollNumber: trimmedUsername, email: googleEmail });
+  assertPasswordStrength(password, { email: googleEmail });
 
   const passwordHash = await bcrypt.hash(password, 10);
-  const localPart = googleEmail.split("@")[0];
-  const derivedRollNumber = extractRollNumber(localPart);
-  // The username only becomes rollNumber when it still matches the digits
-  // Google's email actually carried — if the student edited a numeric
-  // suggestion into something else, or typed a free-text handle for a
-  // name-based address, it stays a login-only username.
-  const rollNumberForInsert = derivedRollNumber === trimmedUsername ? derivedRollNumber : null;
 
-  const existing = await userRepo.findFirstByEmailOrRollNumber(pool, trimmedUsername, {
-    role: "STUDENT",
-  });
-
+  // Always a fresh account — no domain-derived roll number to match an
+  // existing roster row against, and no attempt to link one. A student who
+  // already has an account uses that account's own username+password to
+  // log in; this flow is only ever "create a new one".
   let user;
-  if (existing) {
-    if (existing.school !== "KLH") {
-      throw new ApiError(403, "FORBIDDEN", "This username belongs to a different institution.");
+  try {
+    user = await userRepo.insert(pool, {
+      role: "STUDENT",
+      name: trimmedUsername,
+      email: trimmedUsername,
+      passwordHash,
+      school: "KLH",
+      mustChangePassword: false,
+      googleId,
+      googleEmail,
+    });
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      // Two distinct causes share 23505 here: the username (User_email_key)
+      // or this Google account having already completed setup once before
+      // (User_googleId_key, e.g. a double-submitted request). The username
+      // message is right far more often, and either way the fix from the
+      // student's side is the same — try again.
+      throw new ApiError(409, "USERNAME_TAKEN", "That username was just taken. Please try again.");
     }
-    user = await userRepo.updateFields(
-      pool,
-      existing.id,
-      sql`"passwordHash" = ${passwordHash}, "googleId" = ${googleId}, "googleEmail" = ${googleEmail}, "mustChangePassword" = ${false}`
-    );
-  } else {
-    try {
-      user = await userRepo.insert(pool, {
-        role: "STUDENT",
-        name: trimmedUsername,
-        email: trimmedUsername,
-        passwordHash,
-        rollNumber: rollNumberForInsert,
-        school: "KLH",
-        mustChangePassword: false,
-        googleId,
-        googleEmail,
-      });
-    } catch (err) {
-      if (isUniqueViolation(err)) {
-        throw new ApiError(409, "USERNAME_TAKEN", "That username was just taken. Please try again.");
-      }
-      throw err;
-    }
-  }
-
-  if (!user.isActive) {
-    throw new ApiError(403, "ACCOUNT_DEACTIVATED", "This account has been deactivated. Contact the canteen office.");
+    throw err;
   }
 
   const token = signToken({ sub: user.id, role: user.role, kitchen: user.kitchen }, jwtSecret);
