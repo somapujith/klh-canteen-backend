@@ -23,6 +23,16 @@ function isRetryableTransactionError(err: unknown): boolean {
   return code === "55P03" || code === "57014";
 }
 
+// Postgres 23503 foreign_key_violation — raised when deleting a row (e.g. a
+// MenuItem) that is still referenced by another table under ON DELETE
+// RESTRICT (e.g. OrderItem.menuItemId). This is an expected conflict from
+// existing order history, not a server bug, so surface it as 409 instead of
+// leaking a raw 500.
+function isForeignKeyViolation(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code;
+  return code === "23503";
+}
+
 export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
   if (err instanceof ApiError) {
     return c.json({ error: { message: err.message, code: err.code } }, err.status as any);
@@ -39,6 +49,17 @@ export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
         error: {
           message: "Request could not be completed due to a conflicting operation; please retry",
           code: "CONFLICT_RETRY",
+        },
+      },
+      409
+    );
+  }
+  if (isForeignKeyViolation(err)) {
+    return c.json(
+      {
+        error: {
+          message: "This item cannot be deleted because it is referenced by existing orders",
+          code: "IN_USE",
         },
       },
       409
