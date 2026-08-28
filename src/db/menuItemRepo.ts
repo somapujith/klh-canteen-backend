@@ -16,7 +16,7 @@ import type { Kitchen, MenuItem } from "./schema.js";
 export type Runner = Pool | PoolClient | QueryRunner;
 
 const ALL_COLUMNS = `
-  "id", "name", "imageUrl", "imageHash", "price", "stockQty", "reservedQty", "isAvailable", "categoryId"
+  "id", "name", "imageUrl", "imageHash", "price", "stockQty", "reservedQty", "isAvailable", "isArchived", "categoryId"
 `;
 
 export interface MenuItemCreateInput {
@@ -42,6 +42,10 @@ export interface MenuItemUpdateInput {
  * and the customer view (`isAvailable = true` only). Empty `categoryIds`
  * short-circuits rather than issuing a query that would just return zero
  * rows — the caller (an empty menu) hits this on a fresh/empty kitchen.
+ *
+ * Archived items are excluded from BOTH projections: unlike `isAvailable`,
+ * which the admin view deliberately shows so a sold-out item can be toggled
+ * back on, archival is terminal and the item is gone from the inventory list.
  */
 export async function findMenuItemsByCategoryIds(
   runner: Runner,
@@ -54,7 +58,7 @@ export async function findMenuItemsByCategoryIds(
     runner,
     sql`
       SELECT ${raw(ALL_COLUMNS)} FROM "MenuItem"
-      WHERE "categoryId" = ANY(${categoryIds}) ${availableFilter}
+      WHERE "categoryId" = ANY(${categoryIds}) AND "isArchived" = false ${availableFilter}
     `
   );
   return rows;
@@ -63,7 +67,7 @@ export async function findMenuItemsByCategoryIds(
 export async function findMenuItemById(runner: Runner, id: string): Promise<MenuItem | null> {
   const { rows } = await query<MenuItem>(
     runner,
-    sql`SELECT ${raw(ALL_COLUMNS)} FROM "MenuItem" WHERE "id" = ${id}`
+    sql`SELECT ${raw(ALL_COLUMNS)} FROM "MenuItem" WHERE "id" = ${id} AND "isArchived" = false`
   );
   return rows[0] ?? null;
 }
@@ -82,10 +86,10 @@ export async function findMenuItemWithCategoryKitchen(
     runner,
     sql`
       SELECT mi."id", mi."name", mi."imageUrl", mi."imageHash", mi."price", mi."stockQty", mi."reservedQty",
-             mi."isAvailable", mi."categoryId", c."kitchen" AS "categoryKitchen"
+             mi."isAvailable", mi."isArchived", mi."categoryId", c."kitchen" AS "categoryKitchen"
       FROM "MenuItem" mi
       JOIN "Category" c ON c."id" = mi."categoryId"
-      WHERE mi."id" = ${id}
+      WHERE mi."id" = ${id} AND mi."isArchived" = false
     `
   );
   const row = rows[0];
@@ -130,8 +134,17 @@ export async function updateMenuItem(runner: Runner, id: string, data: MenuItemU
   return rows[0];
 }
 
-export async function deleteMenuItem(runner: Runner, id: string): Promise<void> {
-  const { rowCount } = await query(runner, sql`DELETE FROM "MenuItem" WHERE "id" = ${id}`);
+/**
+ * Soft delete — see MenuItem.isArchived in schema.ts for why this cannot be a
+ * real DELETE. Already-archived rows are filtered out by the WHERE clause, so
+ * a second archive of the same id affects zero rows and 404s exactly as
+ * deleting an already-deleted item did before.
+ */
+export async function archiveMenuItem(runner: Runner, id: string): Promise<void> {
+  const { rowCount } = await query(
+    runner,
+    sql`UPDATE "MenuItem" SET "isArchived" = true WHERE "id" = ${id} AND "isArchived" = false`
+  );
   assertAffected(rowCount, "Menu item not found");
 }
 
@@ -153,7 +166,7 @@ export async function updateMenuItemsByCategory(
 
   const { rowCount } = await query(
     runner,
-    sql`UPDATE "MenuItem" SET ${joinSql(sets)} WHERE "categoryId" = ${categoryId}`
+    sql`UPDATE "MenuItem" SET ${joinSql(sets)} WHERE "categoryId" = ${categoryId} AND "isArchived" = false`
   );
   return rowCount;
 }

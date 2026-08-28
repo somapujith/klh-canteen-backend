@@ -53,6 +53,14 @@ export interface MenuItem {
   stockQty: number;
   reservedQty: number;
   isAvailable: boolean;
+  /**
+   * Soft delete. `isAvailable` is the reversible "sold out today" toggle;
+   * this is the terminal state the admin delete button produces, since
+   * OrderItem's ON DELETE RESTRICT FK makes a real DELETE impossible for any
+   * item that has ever been ordered. Archived items are excluded from every
+   * menu and inventory read, but stay joinable from order history.
+   */
+  isArchived: boolean;
   categoryId: string;
 }
 

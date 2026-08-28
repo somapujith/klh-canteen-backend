@@ -165,6 +165,7 @@ async function claimStock(db: RawRunner, claims: StockClaim[]): Promise<Set<stri
       FROM (VALUES ${claimValues(claims)}) AS r(id, qty)
      WHERE m.id = r.id
        AND m."isAvailable" = TRUE
+       AND m."isArchived" = FALSE
        AND m."stockQty" - m."reservedQty" >= r.qty
     RETURNING m.id
   `,
@@ -481,6 +482,7 @@ interface OrderItemJoinRow {
   mi_stockQty: number;
   mi_reservedQty: number;
   mi_isAvailable: boolean;
+  mi_isArchived: boolean;
   mi_categoryId: string;
 }
 
@@ -511,7 +513,7 @@ async function hydrateOrders<T extends { id: string; studentId: string | null }>
              mi."imageHash" AS "mi_imageHash",
              mi."price"::text AS "mi_price", mi."stockQty" AS "mi_stockQty",
              mi."reservedQty" AS "mi_reservedQty", mi."isAvailable" AS "mi_isAvailable",
-             mi."categoryId" AS "mi_categoryId"
+             mi."isArchived" AS "mi_isArchived", mi."categoryId" AS "mi_categoryId"
         FROM "OrderItem" oi
         JOIN "MenuItem" mi ON mi."id" = oi."menuItemId"
        WHERE oi."orderId" = ANY(${orderIds}::text[])
@@ -543,6 +545,7 @@ async function hydrateOrders<T extends { id: string; studentId: string | null }>
         stockQty: row.mi_stockQty,
         reservedQty: row.mi_reservedQty,
         isAvailable: row.mi_isAvailable,
+        isArchived: row.mi_isArchived,
         categoryId: row.mi_categoryId,
       },
     });
@@ -731,7 +734,7 @@ export async function createOrder(
       SELECT mi.*, c."kitchen" AS "categoryKitchen"
         FROM "MenuItem" mi
         JOIN "Category" c ON c."id" = mi."categoryId"
-       WHERE mi."id" = ANY(${menuItemIds}::text[])
+       WHERE mi."id" = ANY(${menuItemIds}::text[]) AND mi."isArchived" = FALSE
     `,
     ),
     ownerData.studentId

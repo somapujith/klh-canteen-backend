@@ -23,16 +23,6 @@ function isRetryableTransactionError(err: unknown): boolean {
   return code === "55P03" || code === "57014";
 }
 
-// Postgres 23503 foreign_key_violation — raised when deleting a row (e.g. a
-// MenuItem) that is still referenced by another table under ON DELETE
-// RESTRICT (e.g. OrderItem.menuItemId). This is an expected conflict from
-// existing order history, not a server bug, so surface it as 409 instead of
-// leaking a raw 500.
-function isForeignKeyViolation(err: unknown): boolean {
-  const code = (err as { code?: string } | null)?.code;
-  return code === "23503";
-}
-
 export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
   if (err instanceof ApiError) {
     return c.json({ error: { message: err.message, code: err.code } }, err.status as any);
@@ -54,17 +44,23 @@ export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
       409
     );
   }
-  if (isForeignKeyViolation(err)) {
+  // Postgres 23503 foreign_key_violation — a row still referenced by another
+  // table under ON DELETE RESTRICT. Menu items no longer reach here (deleting
+  // one archives it instead; see MenuItem.isArchived), but the other RESTRICT
+  // FKs — Category's, Order's — can still refuse a delete, and a bare 500 tells
+  // the admin nothing. Duplicated from src/db/errors.ts's isForeignKeyViolation
+  // rather than imported: that module imports ApiError from this one.
+  if ((err as { code?: string } | null)?.code === "23503") {
     return c.json(
       {
         error: {
-          message: "This item cannot be deleted because it is referenced by existing orders",
+          message: "This cannot be deleted while other records still reference it",
           code: "IN_USE",
         },
       },
       409
     );
   }
-  console.error("Unhandled error code:", (err as { code?: string } | null)?.code, err);
+  console.error(err);
   return c.json({ error: { message: "Internal server error", code: "INTERNAL" } }, 500);
 };

@@ -142,13 +142,18 @@ export async function updateMenuItem(
   return menuItemRepo.updateMenuItem(runner, id, data);
 }
 
+/**
+ * Archives rather than hard-deletes — OrderItem's ON DELETE RESTRICT FK makes
+ * a real DELETE impossible for any item that has ever been ordered, and order
+ * history has to keep resolving the item it names. See MenuItem.isArchived.
+ */
 export async function deleteMenuItem(runner: Runner, id: string, adminKitchen?: string | null): Promise<void> {
   const existing = await menuItemRepo.findMenuItemWithCategoryKitchen(runner, id);
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Menu item not found");
   if (adminKitchen && existing.categoryKitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to delete this menu item.");
   }
-  await menuItemRepo.deleteMenuItem(runner, id);
+  await menuItemRepo.archiveMenuItem(runner, id);
 }
 
 export async function bulkUpdateCategoryItems(
