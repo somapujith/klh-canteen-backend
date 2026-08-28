@@ -65,6 +65,6 @@ export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
       409
     );
   }
-  console.error(err);
+  console.error("Unhandled error code:", (err as { code?: string } | null)?.code, err);
   return c.json({ error: { message: "Internal server error", code: "INTERNAL" } }, 500);
 };
