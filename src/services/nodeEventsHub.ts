@@ -1,5 +1,5 @@
 /**
- * In-process realtime hub for plain Node (Render).
+ * In-process realtime hub for plain Node (local dev / non-Workers hosts).
  *
  * ---------------------------------------------------------------------------
  * WHY THIS EXISTS
@@ -8,7 +8,7 @@
  * Durable Objects exist only on workerd, so under Node `ORDER_EVENTS_HUB` was
  * unbound and — by design, see sseService.getShardStub — every emit degraded to
  * a silent no-op and `GET /events/stream` answered 503. On Workers that
- * fallback is correct. On Render it meant the kitchen board never moved: an
+ * fallback is correct. Under Node it meant the kitchen board never moved: an
  * order was written to the database and nothing ever told the board about it.
  *
  * This class is the same hub for a runtime that has no Durable Objects. It
@@ -43,7 +43,7 @@
  * SCOPE LIMIT — READ BEFORE SCALING THE SERVICE
  * ---------------------------------------------------------------------------
  * Subscribers live in THIS process's memory. That is correct for exactly one
- * instance, which is what the Render service runs today. With two instances a
+ * instance, which is what a plain-Node process runs. With two instances a
  * client connected to instance A would never see an order placed on instance B.
  * Scaling past one instance means moving fan-out to something shared
  * (Redis pub/sub, or deploying to Workers where the DO already does this).

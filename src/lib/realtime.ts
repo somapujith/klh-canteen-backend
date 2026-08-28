@@ -355,7 +355,7 @@ export const FRAME_KEY_PREFIX = "e:";
 // Frame construction, shared by every hub implementation.
 //
 // There are two hubs: the Durable Object (src/durableObjects/orderEventsHub.ts,
-// Workers) and the in-process one (src/services/nodeEventsHub.ts, Node/Render).
+// Workers) and the in-process one (src/services/nodeEventsHub.ts, plain Node).
 // They differ only in transport and storage — grouping, dedup and payload shape
 // are protocol, not implementation, so they live here. A client cannot tell
 // which hub it is talking to, and that is only true if this logic exists once.

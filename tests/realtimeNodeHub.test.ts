@@ -4,7 +4,7 @@
  * WHAT THIS PROVES. A student places an order over the real HTTP API, and an
  * admin already holding an open `GET /events/stream` receives an
  * ORDER_BOARD_UPDATE frame carrying an ORDER_CREATED delta — without polling
- * and without reconnecting. That is the behaviour that was broken on Render:
+ * and without reconnecting. That is the behaviour that was broken under Node:
  * ORDER_EVENTS_HUB is a Durable Object, so under Node it was unbound, every
  * emit no-opped, /events/stream answered 503, and the kitchen board never
  * moved.
@@ -13,7 +13,7 @@
  * frame is stubbed: the route, the order service, sseService's shard routing
  * and the hub's coalescing all run for real. The only substitution is the hub
  * implementation itself (services/nodeEventsHub.ts) — which is the production
- * code path on Render, not a test double. Delete the hub wiring and these
+ * code path under Node, not a test double. Delete the hub wiring and these
  * tests fail.
  */
 import { describe, it, expect, beforeEach, afterAll, afterEach } from "vitest";

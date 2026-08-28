@@ -4,7 +4,8 @@ import { createApp } from "./app.js";
 import { assertSingleInstance, createNodeEventsHub } from "./services/nodeEventsHub.js";
 
 /**
- * Plain-Node entrypoint for platforms without a Workers runtime (e.g. Render).
+ * Plain-Node entrypoint for local development and any host without a Workers
+ * runtime. Production deploys to Cloudflare Workers (src/index.ts).
  * `getBindings()` (src/lib/context.ts) already falls back to `process.env`
  * here via hono/adapter's `env()`, so no other code needs to change to run
  * under Node — this file only exists because Workers' `export default {
@@ -12,7 +13,7 @@ import { assertSingleInstance, createNodeEventsHub } from "./services/nodeEvents
  *
  * REALTIME. ORDER_EVENTS_HUB is a Durable Object and therefore does not exist
  * under Node, which used to make every emit a no-op and answer
- * `GET /events/stream` with 503 — the kitchen board never updated on Render.
+ * `GET /events/stream` with 503 — the kitchen board never updated under Node.
  * We install an in-process hub speaking the DO's wire contract instead (see
  * services/nodeEventsHub.ts) and pass it as the request bindings, which
  * getBindings() overlays onto process.env. It fans out within THIS process:
@@ -31,6 +32,6 @@ const ORDER_EVENTS_HUB = createNodeEventsHub();
 const fetch = (request: Request) => app.fetch(request, { ORDER_EVENTS_HUB } as never);
 
 serve({ fetch, port }, (info) => {
-  console.log(`KLH Canteen backend (Node/Render) listening on port ${info.port}`);
+  console.log(`KLH Canteen backend (plain Node) listening on port ${info.port}`);
   console.log(`[hub] in-process realtime hub active (SSE only, single instance)`);
 });
