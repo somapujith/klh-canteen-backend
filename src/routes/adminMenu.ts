@@ -14,6 +14,7 @@ import {
   bulkUpdateCategoryItems,
 } from "../services/menuService.js";
 import { uploadMenuItemImage, deleteMenuItemImage, MAX_STORED_IMAGE_BYTES } from "../services/menuImageService.js";
+import { listStockRequests, notifyRestocked } from "../services/stockRequestService.js";
 import { sseService } from "../services/sseService.js";
 import { logAction } from "../services/auditService.js";
 import { getRequestPool, getBindings } from "../lib/context.js";
@@ -158,6 +159,37 @@ adminMenuRouter.post(
     return c.json(result, 200);
   }
 );
+
+/**
+ * Outstanding "tell me when it's back" demand, grouped by item. Kitchen admins
+ * see only their own kitchen; an unscoped admin sees everything.
+ */
+adminMenuRouter.get("/stock-requests", requireAuth("ADMIN"), async (c) => {
+  const pool = getRequestPool(c);
+  const user = c.get("user")!;
+  return c.json({ requests: await listStockRequests(pool, user.kitchen) });
+});
+
+/**
+ * Tells everyone waiting on an item that it is back, then clears the round.
+ *
+ * Reports reachability rather than just a success count: students who never
+ * linked Telegram cannot be messaged, and the admin should see that instead of
+ * being told everyone was notified.
+ */
+adminMenuRouter.post("/stock-requests/:id/notify", requireAuth("ADMIN"), async (c) => {
+  const id = idParamSchema.parse(c.req.param("id"));
+  const pool = getRequestPool(c);
+  const user = c.get("user")!;
+
+  const result = await notifyRestocked(pool, getBindings(c), id, user.kitchen);
+  await logAction(pool, user.id, "STOCK_REQUEST_NOTIFY", "MenuItem", id, {
+    notified: result.notified,
+    unreachable: result.unreachable,
+    cleared: result.cleared,
+  });
+  return c.json(result);
+});
 
 adminMenuRouter.delete("/menu-items/:id/image", requireAuth("ADMIN"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));

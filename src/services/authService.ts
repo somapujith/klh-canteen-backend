@@ -141,6 +141,13 @@ export async function login(
     kitchen: user.kitchen,
     id: user.id,
     /**
+     * Which institution this account belongs to. The client needs it to know
+     * whether school-scoped features apply — stock requests are KLH-only. It
+     * gates the UI only; every endpoint re-checks server-side, since a
+     * response field is not an authorisation decision.
+     */
+    school: user.school,
+    /**
      * Login deliberately still succeeds for a flagged user. The token they get
      * back is a *restricted* one in effect, not in shape: requireAuth() refuses
      * it everywhere except the change-password endpoints, so the only thing

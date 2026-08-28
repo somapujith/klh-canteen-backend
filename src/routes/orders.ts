@@ -9,7 +9,8 @@ import {
   MAX_PREBOOK_DAYS,
   cancelOrder,
 } from "../services/orderService.js";
-import { emitOrderCreated, emitOrderStatusChanged, emitStockChanged } from "../services/sseService.js";
+import { emitOrderCreated, emitOrderStatusChanged, emitStockChanged, emitStockRequest } from "../services/sseService.js";
+import { requestItem } from "../services/stockRequestService.js";
 import { notifyStudentOrderTelegram } from "../services/telegramService.js";
 import { toOrderSummary } from "../lib/orderSummary.js";
 import { getBindings, getRequestPool } from "../lib/context.js";
@@ -58,6 +59,18 @@ const orderLimiter = rateLimit({
   max: 5,
   code: "TOO_MANY_ORDERS",
   message: "Too many orders placed, please wait a minute.",
+});
+
+// Looser than the order limiter — requesting is cheap and a student browsing a
+// picked-over menu may legitimately tap several items in a row. Still capped,
+// because each new request wakes an admin notification that stays on screen
+// until it is dismissed by hand.
+const stockRequestLimiter = rateLimit({
+  prefix: "stock-requests",
+  windowSeconds: 60,
+  max: 20,
+  code: "TOO_MANY_REQUESTS",
+  message: "Too many requests, please wait a minute.",
 });
 
 ordersRouter.post("/", requireAuth("STUDENT"), orderLimiter, async (c) => {
@@ -167,6 +180,33 @@ ordersRouter.post("/:id/cancel", requireAuth("STUDENT"), async (c) => {
     kind: "status",
   });
   return c.json(serializeOrder(order));
+});
+
+/**
+ * "Tell me when this is back" for a sold-out item. KLH students only — the
+ * service enforces that, not just the button.
+ *
+ * The admin is alerted only when the request is NEW: a student tapping an
+ * already-registered button must not pop a fresh notification on the admin's
+ * screen, and with the stack persisting until dismissed, re-alerting would
+ * bury them in duplicates of one student's impatience.
+ */
+ordersRouter.post("/stock-requests/:menuItemId", requireAuth("STUDENT"), stockRequestLimiter, async (c) => {
+  const menuItemId = idParamSchema.parse(c.req.param("menuItemId"));
+  const pool = getRequestPool(c);
+  const user = c.get("user")!;
+
+  const result = await requestItem(pool, menuItemId, user.id);
+
+  if (result.created) {
+    await emitStockRequest(getBindings(c), {
+      menuItemId,
+      menuItemName: result.menuItemName,
+      kitchen: result.kitchen,
+      count: result.count,
+    });
+  }
+  return c.json({ requested: true, count: result.count });
 });
 
 /**

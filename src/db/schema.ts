@@ -112,6 +112,18 @@ export interface CollectionWindow {
   createdAt: Date;
 }
 
+/**
+ * A student asking to be told when a sold-out item is back. At most one row
+ * per (menuItemId, studentId) — see the migration for why the count depends
+ * on that. Cleared once the admin sends the restock notification.
+ */
+export interface StockRequest {
+  id: string;
+  menuItemId: string;
+  studentId: string;
+  createdAt: Date;
+}
+
 export interface OrderItem {
   id: string;
   orderId: string;

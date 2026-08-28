@@ -238,7 +238,28 @@ export interface OrderSeenDelta {
   lockedByAdminId?: string | null;
 }
 
-export type OrderBoardDelta = OrderCreatedDelta | OrderStatusDelta | OrderSeenDelta | FullRefreshDelta;
+/**
+ * A student asked to be told when a sold-out item returns.
+ *
+ * `count` is the item's whole outstanding total, not an increment — the frame
+ * dedup in buildFramePayload keys on kind:menuItemId and keeps the latest, so
+ * several requests for one item inside a window collapse to the current
+ * figure. Requests for different items keep distinct keys and all arrive.
+ */
+export interface StockRequestDelta {
+  kind: "STOCK_REQUEST";
+  menuItemId: string;
+  menuItemName: string;
+  count: number;
+  requestedAt: string;
+}
+
+export type OrderBoardDelta =
+  | OrderCreatedDelta
+  | OrderStatusDelta
+  | OrderSeenDelta
+  | StockRequestDelta
+  | FullRefreshDelta;
 
 export type AnyDelta = MenuDelta | OrderBoardDelta;
 

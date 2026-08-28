@@ -292,6 +292,31 @@ export async function emitOrderStatusChanged(env: HubEnv, change: OrderStatusCha
   await emit(env, items);
 }
 
+/**
+ * A student asked to be told when a sold-out item is back.
+ *
+ * Goes to the item's kitchen rather than ALL: it is an admin signal, and the
+ * kitchen that stocks the item is the one that can act on it.
+ */
+export async function emitStockRequest(
+  env: HubEnv,
+  params: { menuItemId: string; menuItemName: string; kitchen: Kitchen; count: number },
+): Promise<void> {
+  await emit(env, [
+    {
+      type: EVENT_ORDER_BOARD_UPDATE,
+      audience: kitchenAudience(params.kitchen),
+      delta: {
+        kind: "STOCK_REQUEST",
+        menuItemId: params.menuItemId,
+        menuItemName: params.menuItemName,
+        count: params.count,
+        requestedAt: new Date().toISOString(),
+      },
+    },
+  ]);
+}
+
 /** An admin opened an order: clears the "new" badge and sets the soft lock. */
 export async function emitOrderSeen(
   env: HubEnv,
