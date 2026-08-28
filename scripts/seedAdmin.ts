@@ -18,8 +18,9 @@ const pool = getPool(process.env.DATABASE_URL!);
  * an exemption that silently disappears the day the default changes:
  *
  *   superadmin@klh.edu.in / admin@klh.edu.in
- *     The only way back into the admin UI. Flagging them means nobody can
- *     reach the screen that un-flags anybody.
+ *   superadmin@drk.edu.in / admin@drk.edu.in
+ *     The only way back into the admin UI, per institution. Flagging them
+ *     means nobody can reach the screen that un-flags anybody.
  *   student@klh.edu.in
  *     The demo student a live recording is being made against. It must keep
  *     behaving exactly as it does today.
@@ -48,12 +49,25 @@ const pool = getPool(process.env.DATABASE_URL!);
 const RETIRED_KITCHEN_ADMIN_EMAILS = ["snacks_admin@klh.edu.in", "meals_admin@klh.edu.in"];
 
 /** Accounts that must keep working without a forced password change. */
-const EXEMPT_EMAILS = ["superadmin@klh.edu.in", "admin@klh.edu.in"];
+const EXEMPT_EMAILS = [
+  "superadmin@klh.edu.in",
+  "admin@klh.edu.in",
+  "superadmin@drk.edu.in",
+  "admin@drk.edu.in",
+];
 
 async function main() {
   const email = process.env.SEED_ADMIN_EMAIL ?? "admin@klh.edu.in";
   const password = process.env.SEED_ADMIN_PASSWORD ?? "changeme123";
   const passwordHash = await bcrypt.hash(password, 10);
+
+  // DRK admins. login() rejects a correct password presented against the wrong
+  // school (authService.ts), so these rows MUST carry school='DRK' explicitly —
+  // the column defaults to 'KLH' and a DRK admin seeded without it could never
+  // sign in from the DRK side of the login picker.
+  const drkEmail = process.env.SEED_DRK_ADMIN_EMAIL ?? "admin@drk.edu.in";
+  const drkPassword = process.env.SEED_DRK_ADMIN_PASSWORD ?? password;
+  const drkPasswordHash = await bcrypt.hash(drkPassword, 10);
 
   const studentEmail = process.env.SEED_STUDENT_EMAIL ?? "student@klh.edu.in";
   const studentPassword = process.env.SEED_STUDENT_PASSWORD ?? "student123";
@@ -101,6 +115,39 @@ async function main() {
     `,
   );
 
+  // DRK Admin — same unrestricted-kitchen treatment as the KLH admin above.
+  await query<User>(
+    pool,
+    sql`
+      INSERT INTO "User" ("id", "email", "passwordHash", "name", "role", "school", "mustChangePassword")
+      VALUES (${crypto.randomUUID()}, ${drkEmail}, ${drkPasswordHash}, 'DRK Admin', 'ADMIN'::"Role", 'DRK'::"School", false)
+      ON CONFLICT ("email") DO UPDATE SET
+        "passwordHash" = EXCLUDED."passwordHash",
+        "name" = EXCLUDED."name",
+        "kitchen" = NULL,
+        "school" = EXCLUDED."school",
+        "mustChangePassword" = EXCLUDED."mustChangePassword",
+        "isActive" = true
+      RETURNING *
+    `,
+  );
+
+  // DRK Super Admin
+  await query<User>(
+    pool,
+    sql`
+      INSERT INTO "User" ("id", "email", "passwordHash", "name", "role", "school", "mustChangePassword")
+      VALUES (${crypto.randomUUID()}, 'superadmin@drk.edu.in', ${drkPasswordHash}, 'DRK Super Admin', 'SUPERADMIN'::"Role", 'DRK'::"School", false)
+      ON CONFLICT ("email") DO UPDATE SET
+        "passwordHash" = EXCLUDED."passwordHash",
+        "name" = EXCLUDED."name",
+        "school" = EXCLUDED."school",
+        "mustChangePassword" = EXCLUDED."mustChangePassword",
+        "isActive" = true
+      RETURNING *
+    `,
+  );
+
   // Demo Student (matches the "Student Account" quick-fill on the login page)
   await query<User>(
     pool,
@@ -119,6 +166,7 @@ async function main() {
 
   console.log(`Student seeded: ${studentEmail} (roll ${studentRollNumber})`);
   console.log(`Admins seeded: ${email} (unrestricted) & superadmin@klh.edu.in`);
+  console.log(`DRK admins seeded: ${drkEmail} (unrestricted) & superadmin@drk.edu.in [school=DRK]`);
   console.log(`Retired (deactivated): ${RETIRED_KITCHEN_ADMIN_EMAILS.join(", ")}`);
   console.log("Seeded accounts are exempt from the forced password change (mustChangePassword=false).");
 
