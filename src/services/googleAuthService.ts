@@ -221,6 +221,21 @@ export async function completeGoogleKlhLogin(
   }
   assertPasswordStrength(password, { email: googleEmail });
 
+  // Checked up front, not inferred from a 23505 after the fact: this Google
+  // account may already be linked elsewhere — DRK's single-call flow, an
+  // earlier KLH setup, or the guest recovery flow all write to the same
+  // googleId column. Without this check, a re-linked account's insert would
+  // collide on User_googleId_key and (before this fix) surface as a
+  // confusing "username taken" no matter what username was tried.
+  const linkedElsewhere = await userRepo.findByGoogleId(pool, googleId);
+  if (linkedElsewhere) {
+    throw new ApiError(
+      409,
+      "GOOGLE_ACCOUNT_ALREADY_LINKED",
+      "This Google account is already linked to another login. Please use a different Google account."
+    );
+  }
+
   const passwordHash = await bcrypt.hash(password, 10);
 
   // Always a fresh account — no domain-derived roll number to match an
@@ -241,11 +256,9 @@ export async function completeGoogleKlhLogin(
     });
   } catch (err) {
     if (isUniqueViolation(err)) {
-      // Two distinct causes share 23505 here: the username (User_email_key)
-      // or this Google account having already completed setup once before
-      // (User_googleId_key, e.g. a double-submitted request). The username
-      // message is right far more often, and either way the fix from the
-      // student's side is the same — try again.
+      // The googleId race is caught by the findByGoogleId check above; a
+      // 23505 reaching here is the username instead (a second request for
+      // the same username landed between that check and this insert).
       throw new ApiError(409, "USERNAME_TAKEN", "That username was just taken. Please try again.");
     }
     throw err;

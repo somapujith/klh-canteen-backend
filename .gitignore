@@ -23,3 +23,6 @@ loadtest-*.json
 scripts/perf/*.json
 **/creds*.json
 **/*-creds.json
+
+# Local dumps of production order data (student names, order history).
+order-backup-*.json
