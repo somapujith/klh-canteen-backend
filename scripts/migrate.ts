@@ -14,7 +14,7 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Pool } from "@neondatabase/serverless";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -58,7 +58,15 @@ export async function runMigrations(databaseUrl: string): Promise<string[]> {
   return applied;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL, not a `file://${argv[1]}` template: on Windows argv[1] is a
+// backslashed drive path ("H:\...") while import.meta.url is a three-slash file URL
+// ("file:///H:/..."), so the template never matches and the CLI silently does
+// nothing — exiting 0 having applied no migrations.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  // CLI-only, matching scripts/seedAdmin.ts. Importers (the test harness)
+  // resolve their own DATABASE_URL and must not have .env loaded under them —
+  // that is exactly how the live database gets migrated by accident.
+  await import("dotenv/config");
   const url = process.env.DATABASE_URL;
   if (!url) {
     console.error("DATABASE_URL not set");
