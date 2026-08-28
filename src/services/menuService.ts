@@ -10,6 +10,9 @@ import type { QueryRunner } from "../db/sql.js";
 // per invocation (no interactive transaction), so this is safe for the
 // write paths too — only the route layer decides which runner to pass, and
 // only routes/menu.ts's read (getCategorizedMenu) actually uses the HTTP one.
+//
+// deleteCategory is the one exception: its archive cascade spans two
+// statements that must commit together, so it demands a real Pool.
 type Runner = Pool | PoolClient | QueryRunner;
 
 /**
@@ -106,13 +109,25 @@ export async function updateCategory(
   return categoryRepo.updateCategory(runner, id, data);
 }
 
-export async function deleteCategory(runner: Runner, id: string, adminKitchen?: string | null): Promise<void> {
-  const existing = await categoryRepo.findCategoryById(runner, id);
+/**
+ * Archives the category and everything in it — see Category.isArchived. Takes
+ * a Pool rather than a Runner because the cascade is transactional.
+ *
+ * Returns the number of items archived alongside it; the route reports that
+ * in the audit log, since "deleted a category" understates removing a dozen
+ * items with it.
+ */
+export async function deleteCategory(
+  pool: Pool,
+  id: string,
+  adminKitchen?: string | null
+): Promise<{ archivedItems: number }> {
+  const existing = await categoryRepo.findCategoryById(pool, id);
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Category not found");
   if (adminKitchen && existing.kitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to delete this category.");
   }
-  await categoryRepo.deleteCategory(runner, id);
+  return categoryRepo.archiveCategoryWithItems(pool, id);
 }
 
 export async function createMenuItem(

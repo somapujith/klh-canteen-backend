@@ -55,8 +55,11 @@ adminMenuRouter.delete("/categories/:id", requireAuth("ADMIN"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));
   const pool = getRequestPool(c);
   const user = c.get("user")!;
-  await deleteCategory(pool, id, user.kitchen || undefined);
-  await logAction(pool, user.id, "CATEGORY_DELETE", "Category", id);
+  const { archivedItems } = await deleteCategory(pool, id, user.kitchen || undefined);
+  await logAction(pool, user.id, "CATEGORY_DELETE", "Category", id, { archivedItems });
+  // The cascade takes the category's items off the menu with it, so customers
+  // holding a stale menu have to be told, exactly as the item delete does.
+  await sseService.broadcastMenuUpdate(getBindings(c));
   return c.body(null, 204);
 });
 

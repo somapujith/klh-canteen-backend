@@ -40,6 +40,10 @@ export interface Category {
   name: string;
   sortOrder: number;
   kitchen: Kitchen;
+  /** Soft delete, for the same reason as MenuItem.isArchived — MenuItem's FK
+   *  to Category is ON DELETE RESTRICT. Archiving a category archives its
+   *  items with it. */
+  isArchived: boolean;
 }
 
 export interface MenuItem {

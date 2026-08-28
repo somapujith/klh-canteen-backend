@@ -13,11 +13,12 @@ import type { Pool, PoolClient } from "@neondatabase/serverless";
 import { sql, joinSql, raw, query, type QueryRunner } from "./sql.js";
 import type { SqlFragment } from "./sql.js";
 import { assertAffected } from "./errors.js";
+import { withTransaction } from "./tx.js";
 import type { Category, Kitchen } from "./schema.js";
 
 export type Runner = Pool | PoolClient | QueryRunner;
 
-const ALL_COLUMNS = `"id", "name", "sortOrder", "kitchen"`;
+const ALL_COLUMNS = `"id", "name", "sortOrder", "kitchen", "isArchived"`;
 
 export interface CategoryCreateInput {
   name: string;
@@ -35,10 +36,14 @@ export interface CategoryUpdateInput {
  * `prisma.category.findMany({ orderBy: { sortOrder: "asc" } })` was.
  */
 export async function findCategories(runner: Runner, kitchen?: Kitchen): Promise<Category[]> {
-  const where = kitchen ? sql`WHERE "kitchen" = ${kitchen}` : sql``;
+  const kitchenFilter = kitchen ? sql`AND "kitchen" = ${kitchen}` : sql``;
   const { rows } = await query<Category>(
     runner,
-    sql`SELECT ${raw(ALL_COLUMNS)} FROM "Category" ${where} ORDER BY "sortOrder" ASC`
+    sql`
+      SELECT ${raw(ALL_COLUMNS)} FROM "Category"
+      WHERE "isArchived" = false ${kitchenFilter}
+      ORDER BY "sortOrder" ASC
+    `
   );
   return rows;
 }
@@ -46,7 +51,7 @@ export async function findCategories(runner: Runner, kitchen?: Kitchen): Promise
 export async function findCategoryById(runner: Runner, id: string): Promise<Category | null> {
   const { rows } = await query<Category>(
     runner,
-    sql`SELECT ${raw(ALL_COLUMNS)} FROM "Category" WHERE "id" = ${id}`
+    sql`SELECT ${raw(ALL_COLUMNS)} FROM "Category" WHERE "id" = ${id} AND "isArchived" = false`
   );
   return rows[0] ?? null;
 }
@@ -83,13 +88,34 @@ export async function updateCategory(runner: Runner, id: string, data: CategoryU
 
   const { rows, rowCount } = await query<Category>(
     runner,
-    sql`UPDATE "Category" SET ${joinSql(sets)} WHERE "id" = ${id} RETURNING ${raw(ALL_COLUMNS)}`
+    sql`UPDATE "Category" SET ${joinSql(sets)} WHERE "id" = ${id} AND "isArchived" = false RETURNING ${raw(ALL_COLUMNS)}`
   );
   assertAffected(rowCount, "Category not found");
   return rows[0];
 }
 
-export async function deleteCategory(runner: Runner, id: string): Promise<void> {
-  const { rowCount } = await query(runner, sql`DELETE FROM "Category" WHERE "id" = ${id}`);
-  assertAffected(rowCount, "Category not found");
+/**
+ * Soft delete, cascading to the category's items — see Category.isArchived.
+ *
+ * Takes a Pool rather than a Runner because the two UPDATEs have to be one
+ * transaction: archiving the category but not its items would leave those
+ * items on the menu belonging to a category nobody can see, and archiving the
+ * items but not the category would empty a category that is still listed.
+ *
+ * Returns how many items went with it, so the caller can report it.
+ */
+export async function archiveCategoryWithItems(pool: Pool, id: string): Promise<{ archivedItems: number }> {
+  return withTransaction(pool, async (client) => {
+    const { rowCount } = await query(
+      client,
+      sql`UPDATE "Category" SET "isArchived" = true WHERE "id" = ${id} AND "isArchived" = false`
+    );
+    assertAffected(rowCount, "Category not found");
+
+    const { rowCount: archivedItems } = await query(
+      client,
+      sql`UPDATE "MenuItem" SET "isArchived" = true WHERE "categoryId" = ${id} AND "isArchived" = false`
+    );
+    return { archivedItems };
+  });
 }
