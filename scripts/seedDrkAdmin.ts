@@ -16,11 +16,15 @@
  *                   treats NULL as unrestricted, so this one account manages
  *                   both SNACKS and MEALS.
  *
- * mustChangePassword is TRUE here, unlike the accounts in seedAdmin.ts's
- * exempt list: the bootstrap password is weak and known to whoever ran this,
- * so it is a one-time credential, not a permanent one. requireAuth() will
- * refuse every endpoint except the ones that clear the flag until the admin
- * sets their own password.
+ * mustChangePassword defaults to FALSE, matching the accounts on
+ * seedAdmin.ts's exempt list: this is the way back INTO the admin UI, and
+ * flagging it means the operator's first login lands on a password-change
+ * screen instead of the board they were trying to reach. The supplied
+ * password is therefore permanent until someone changes it deliberately.
+ *
+ * Set SEED_DRK_FORCE_CHANGE=true to flag the account instead, which is the
+ * right call when the password was transmitted somewhere it shouldn't have
+ * been and is meant to be a one-time credential.
  *
  * Usage:
  *   SEED_DRK_EMAIL=admin@drk SEED_DRK_PASSWORD=... npx tsx scripts/seedDrkAdmin.ts
@@ -35,6 +39,7 @@ import type { User } from "../src/db/schema.js";
 const email = process.env.SEED_DRK_EMAIL;
 const password = process.env.SEED_DRK_PASSWORD;
 const name = process.env.SEED_DRK_NAME ?? "DRK Admin";
+const forceChange = process.env.SEED_DRK_FORCE_CHANGE === "true";
 
 if (!email || !password) {
   console.error("SEED_DRK_EMAIL and SEED_DRK_PASSWORD are both required.");
@@ -66,7 +71,7 @@ async function main() {
                  "school" = 'DRK',
                  "kitchen" = NULL,
                  "isActive" = true,
-                 "mustChangePassword" = true,
+                 "mustChangePassword" = ${forceChange},
                  "tokensValidFrom" = now()
            WHERE "id" = ${row.id}`
     );
@@ -81,7 +86,7 @@ async function main() {
   await query(
     pool,
     sql`INSERT INTO "User" ("id", "role", "email", "passwordHash", "name", "kitchen", "school", "mustChangePassword", "isActive")
-        VALUES (${id}, 'ADMIN', ${email}, ${passwordHash}, ${name}, NULL, 'DRK', true, true)`
+        VALUES (${id}, 'ADMIN', ${email}, ${passwordHash}, ${name}, NULL, 'DRK', ${forceChange}, true)`
   );
   console.log(`CREATED ${email} (id ${id}) — role ADMIN, school DRK, kitchen unrestricted.`);
 }
