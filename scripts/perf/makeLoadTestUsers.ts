@@ -135,7 +135,7 @@ async function provision(): Promise<void> {
   console.log(`Credentials written to ${cfg.out} — treat as a secret; it is gitignored.`);
   console.log("\nAdmin accounts are NOT created here. Put an existing admin login in its own");
   console.log("file to pass as --admin-creds, e.g.:");
-  console.log('  [{ "identifier": "admin@klh.edu.in", "password": "...", "school": "KLH" }]');
+  console.log('  [{ "identifier": "admin@klh", "password": "...", "school": "KLH" }]');
   console.log(`\nWhen finished:  npx tsx scripts/perf/makeLoadTestUsers.ts --cleanup`);
 }
 

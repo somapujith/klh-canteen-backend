@@ -34,8 +34,11 @@ function toSafeUser(user: User): SafeUser {
  */
 export const PROTECTED_ACCOUNT_EMAILS: readonly string[] = [
   "superadmin@klh.edu.in",
-  "admin@klh.edu.in",
+  "admin@klh",
   "student@klh.edu.in",
+  // DRK's staff logins are the same "only way back in" case as KLH's.
+  "admin@drk.edu.in",
+  "admin@drk",
 ];
 
 const PROTECTED_EMAIL_SET = new Set(PROTECTED_ACCOUNT_EMAILS.map((e) => e.toLowerCase()));

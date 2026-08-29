@@ -53,7 +53,7 @@ cd backend
 npx tsx scripts/perf/makeLoadTestUsers.ts --count 100 --out loadtest-users.json
 
 # 2. Admin credentials, by hand, in their own file (an existing admin login)
-#    [{ "identifier": "admin@klh.edu.in", "password": "...", "school": "KLH" }]
+#    [{ "identifier": "admin@klh", "password": "...", "school": "KLH" }]
 
 # 3. Dry run first — prints the plan, sends nothing
 npx tsx scripts/perf/prodLoadTest.ts --dry-run \

@@ -17,8 +17,8 @@ const pool = getPool(process.env.DATABASE_URL!);
  * than left to the column default — an exemption that depends on a default is
  * an exemption that silently disappears the day the default changes:
  *
- *   superadmin@klh.edu.in / admin@klh.edu.in
- *   superadmin@drk.edu.in / admin@drk.edu.in
+ *   superadmin@klh.edu.in / admin@klh
+ *   superadmin@drk.edu.in / admin@drk.edu.in / admin@drk
  *     The only way back into the admin UI, per institution. Flagging them
  *     means nobody can reach the screen that un-flags anybody.
  *   student@klh.edu.in
@@ -51,13 +51,14 @@ const RETIRED_KITCHEN_ADMIN_EMAILS = ["snacks_admin@klh.edu.in", "meals_admin@kl
 /** Accounts that must keep working without a forced password change. */
 const EXEMPT_EMAILS = [
   "superadmin@klh.edu.in",
-  "admin@klh.edu.in",
+  "admin@klh",
   "superadmin@drk.edu.in",
   "admin@drk.edu.in",
+  "admin@drk",
 ];
 
 async function main() {
-  const email = process.env.SEED_ADMIN_EMAIL ?? "admin@klh.edu.in";
+  const email = process.env.SEED_ADMIN_EMAIL ?? "admin@klh";
   const password = process.env.SEED_ADMIN_PASSWORD ?? "changeme123";
   const passwordHash = await bcrypt.hash(password, 10);
 
