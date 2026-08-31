@@ -485,6 +485,8 @@ interface OrderItemJoinRow {
   mi_isArchived: boolean;
   mi_categoryId: string;
   mi_sortOrder: number;
+  mi_servingInfo: string | null;
+  mi_servingInfoVisible: boolean;
 }
 
 /**
@@ -499,6 +501,7 @@ interface OrderItemJoinRow {
 async function hydrateOrders<T extends { id: string; studentId: string | null }>(
   runner: RawRunner,
   orders: T[],
+  opts: { maskHiddenServingInfo?: boolean } = {},
 ): Promise<(T & { items: (OrderItem & { menuItem: MenuItem })[]; student: StudentSummary | null })[]> {
   if (orders.length === 0) return [];
   const orderIds = orders.map((o) => o.id);
@@ -515,7 +518,8 @@ async function hydrateOrders<T extends { id: string; studentId: string | null }>
              mi."price"::text AS "mi_price", mi."stockQty" AS "mi_stockQty",
              mi."reservedQty" AS "mi_reservedQty", mi."isAvailable" AS "mi_isAvailable",
              mi."isArchived" AS "mi_isArchived", mi."categoryId" AS "mi_categoryId",
-             mi."sortOrder" AS "mi_sortOrder"
+             mi."sortOrder" AS "mi_sortOrder", mi."servingInfo" AS "mi_servingInfo",
+             mi."servingInfoVisible" AS "mi_servingInfoVisible"
         FROM "OrderItem" oi
         JOIN "MenuItem" mi ON mi."id" = oi."menuItemId"
        WHERE oi."orderId" = ANY(${orderIds}::text[])
@@ -550,6 +554,10 @@ async function hydrateOrders<T extends { id: string; studentId: string | null }>
         isArchived: row.mi_isArchived,
         categoryId: row.mi_categoryId,
         sortOrder: row.mi_sortOrder,
+        // Same rule as the live menu (getCategorizedMenu): hidden text stays
+        // hidden in a student's/guest's own order history too, not just the menu.
+        servingInfo: opts.maskHiddenServingInfo && !row.mi_servingInfoVisible ? null : row.mi_servingInfo,
+        servingInfoVisible: row.mi_servingInfoVisible,
       },
     });
     itemsByOrder.set(row.orderId, bucket);
@@ -900,7 +908,7 @@ export async function getStudentOrders(pool: Pool, studentId: string) {
     pool,
     sql`SELECT * FROM "Order" WHERE "studentId" = ${studentId}::text ORDER BY "createdAt" DESC`,
   );
-  return hydrateOrders(pool, rows);
+  return hydrateOrders(pool, rows, { maskHiddenServingInfo: true });
 }
 
 export async function getOrderForStudent(pool: Pool, orderId: string, studentId: string) {
@@ -910,7 +918,7 @@ export async function getOrderForStudent(pool: Pool, orderId: string, studentId:
   );
   if (rows.length === 0) throw new ApiError(404, "NOT_FOUND", "Order not found");
 
-  const [order] = await hydrateOrders(pool, rows);
+  const [order] = await hydrateOrders(pool, rows, { maskHiddenServingInfo: true });
   return order;
 }
 
@@ -926,7 +934,7 @@ export async function getGuestOrders(pool: Pool, guestSessionId: string) {
     pool,
     sql`SELECT * FROM "Order" WHERE "guestSessionId" = ${guestSessionId}::text ORDER BY "createdAt" DESC`,
   );
-  return hydrateOrders(pool, rows);
+  return hydrateOrders(pool, rows, { maskHiddenServingInfo: true });
 }
 
 /**
@@ -943,7 +951,7 @@ export async function getOrderForGuest(pool: Pool, orderId: string, guestSession
   );
   if (rows.length === 0) throw new ApiError(404, "NOT_FOUND", "Order not found");
 
-  const [order] = await hydrateOrders(pool, rows);
+  const [order] = await hydrateOrders(pool, rows, { maskHiddenServingInfo: true });
   return order;
 }
 
@@ -1335,7 +1343,7 @@ export async function cancelOrder(
     throw new ApiError(409, "ALREADY_DELIVERED", "Order was already delivered");
   }
   if (order.status === "CANCELLED") {
-    const [hydrated] = await hydrateOrders(pool, [order]);
+    const [hydrated] = await hydrateOrders(pool, [order], { maskHiddenServingInfo: true });
     return hydrated;
   }
 
@@ -1345,6 +1353,6 @@ export async function cancelOrder(
     pool,
     sql`UPDATE "Order" SET "status" = 'CANCELLED'::"OrderStatus" WHERE "id" = ${orderId}::text RETURNING *`,
   );
-  const [hydrated] = await hydrateOrders(pool, updatedRows);
+  const [hydrated] = await hydrateOrders(pool, updatedRows, { maskHiddenServingInfo: true });
   return hydrated;
 }

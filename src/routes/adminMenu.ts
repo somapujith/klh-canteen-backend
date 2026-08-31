@@ -32,6 +32,16 @@ const menuItemSchema = z.object({
   stockQty: z.number().int().min(0),
   categoryId: z.string().uuid(),
   sortOrder: z.number().int().optional(),
+  // Free text the admin types themselves, e.g. "500g" or "6 pcs" — not a tracked number.
+  // Charset mirrors the client-side input strip so a direct API call can't
+  // sneak in what the form UI already prevents by construction.
+  servingInfo: z
+    .string()
+    .max(80)
+    .regex(/^[a-zA-Z0-9 .,/-]*$/)
+    .nullable()
+    .optional(),
+  servingInfoVisible: z.boolean().optional(),
 });
 const menuItemUpdateSchema = menuItemSchema.partial();
 const idParamSchema = z.string().uuid();
@@ -84,7 +94,8 @@ adminMenuRouter.patch("/categories/:id/bulk-items", requireAuth("ADMIN"), async 
 adminMenuRouter.post("/menu-items", requireAuth("ADMIN"), async (c) => {
   const data = menuItemSchema.parse(await c.req.json());
   const pool = getRequestPool(c);
-  const item = await createMenuItem(pool, data);
+  const user = c.get("user")!;
+  const item = await createMenuItem(pool, data, user.kitchen || undefined);
   await sseService.broadcastMenuUpdate(getBindings(c));
   return c.json(item, 201);
 });

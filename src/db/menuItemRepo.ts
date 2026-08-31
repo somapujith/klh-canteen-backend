@@ -16,7 +16,7 @@ import type { Kitchen, MenuItem } from "./schema.js";
 export type Runner = Pool | PoolClient | QueryRunner;
 
 const ALL_COLUMNS = `
-  "id", "name", "imageUrl", "imageHash", "price", "stockQty", "reservedQty", "isAvailable", "isArchived", "categoryId", "sortOrder"
+  "id", "name", "imageUrl", "imageHash", "price", "stockQty", "reservedQty", "isAvailable", "isArchived", "categoryId", "sortOrder", "servingInfo", "servingInfoVisible"
 `;
 
 export interface MenuItemCreateInput {
@@ -26,6 +26,8 @@ export interface MenuItemCreateInput {
   stockQty: number;
   categoryId: string;
   sortOrder?: number;
+  servingInfo?: string | null;
+  servingInfoVisible?: boolean;
 }
 
 export interface MenuItemUpdateInput {
@@ -36,6 +38,8 @@ export interface MenuItemUpdateInput {
   isAvailable?: boolean;
   categoryId?: string;
   sortOrder?: number;
+  servingInfo?: string | null;
+  servingInfoVisible?: boolean;
 }
 
 /**
@@ -89,7 +93,8 @@ export async function findMenuItemWithCategoryKitchen(
     runner,
     sql`
       SELECT mi."id", mi."name", mi."imageUrl", mi."imageHash", mi."price", mi."stockQty", mi."reservedQty",
-             mi."isAvailable", mi."isArchived", mi."categoryId", c."kitchen" AS "categoryKitchen"
+             mi."isAvailable", mi."isArchived", mi."categoryId", mi."sortOrder", mi."servingInfo", mi."servingInfoVisible",
+             c."kitchen" AS "categoryKitchen"
       FROM "MenuItem" mi
       JOIN "Category" c ON c."id" = mi."categoryId"
       WHERE mi."id" = ${id} AND mi."isArchived" = false
@@ -105,8 +110,8 @@ export async function insertMenuItem(runner: Runner, data: MenuItemCreateInput):
   const { rows } = await query<MenuItem>(
     runner,
     sql`
-      INSERT INTO "MenuItem" ("id", "name", "imageUrl", "price", "stockQty", "categoryId", "sortOrder")
-      VALUES (${crypto.randomUUID()}, ${data.name}, ${data.imageUrl}, ${data.price}, ${data.stockQty}, ${data.categoryId}, ${data.sortOrder ?? 0})
+      INSERT INTO "MenuItem" ("id", "name", "imageUrl", "price", "stockQty", "categoryId", "sortOrder", "servingInfo", "servingInfoVisible")
+      VALUES (${crypto.randomUUID()}, ${data.name}, ${data.imageUrl}, ${data.price}, ${data.stockQty}, ${data.categoryId}, ${data.sortOrder ?? 0}, ${data.servingInfo ?? null}, ${data.servingInfoVisible ?? false})
       RETURNING ${raw(ALL_COLUMNS)}
     `
   );
@@ -123,6 +128,8 @@ export async function updateMenuItem(runner: Runner, id: string, data: MenuItemU
   if (data.isAvailable !== undefined) sets.push(sql`"isAvailable" = ${data.isAvailable}`);
   if (data.categoryId !== undefined) sets.push(sql`"categoryId" = ${data.categoryId}`);
   if (data.sortOrder !== undefined) sets.push(sql`"sortOrder" = ${data.sortOrder}`);
+  if (data.servingInfo !== undefined) sets.push(sql`"servingInfo" = ${data.servingInfo}`);
+  if (data.servingInfoVisible !== undefined) sets.push(sql`"servingInfoVisible" = ${data.servingInfoVisible}`);
 
   if (sets.length === 0) {
     const existing = await findMenuItemById(runner, id);

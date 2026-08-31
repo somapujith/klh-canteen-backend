@@ -62,6 +62,10 @@ export interface MenuItem {
   stockQty: number;
   reservedQty: number;
   isAvailable: boolean;
+  /** Free text the admin types themselves, e.g. "500g" or "6 pcs" — not tracked as a number. */
+  servingInfo: string | null;
+  /** Whether servingInfo shows on the customer-facing menu. Independent of the text itself, so it can stay saved while hidden. */
+  servingInfoVisible: boolean;
   /**
    * Soft delete. `isAvailable` is the reversible "sold out today" toggle;
    * this is the terminal state the admin delete button produces, since

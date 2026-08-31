@@ -80,6 +80,8 @@ export async function getCategorizedMenu(runner: Runner, kitchen?: string, isAdm
           ...item,
           stockQty: available,
           isAvailable: item.isAvailable && available > 0,
+          // Hidden text never leaves the server, not just hidden client-side.
+          servingInfo: item.servingInfoVisible ? item.servingInfo : null,
         };
       }),
     })),
@@ -139,15 +141,35 @@ export async function createMenuItem(
     stockQty: number;
     categoryId: string;
     sortOrder?: number;
-  }
+    servingInfo?: string | null;
+    servingInfoVisible?: boolean;
+  },
+  adminKitchen?: string | null
 ): Promise<MenuItem> {
+  if (adminKitchen) {
+    const category = await categoryRepo.findCategoryById(runner, data.categoryId);
+    if (!category) throw new ApiError(404, "NOT_FOUND", "Category not found");
+    if (category.kitchen !== adminKitchen) {
+      throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to add items to this category.");
+    }
+  }
   return menuItemRepo.insertMenuItem(runner, data);
 }
 
 export async function updateMenuItem(
   runner: Runner,
   id: string,
-  data: Partial<{ name: string; imageUrl: string | null; price: string; stockQty: number; isAvailable: boolean; categoryId: string; sortOrder: number }>,
+  data: Partial<{
+    name: string;
+    imageUrl: string | null;
+    price: string;
+    stockQty: number;
+    isAvailable: boolean;
+    categoryId: string;
+    sortOrder: number;
+    servingInfo: string | null;
+    servingInfoVisible: boolean;
+  }>,
   adminKitchen?: string | null
 ): Promise<MenuItem> {
   const existing = await menuItemRepo.findMenuItemWithCategoryKitchen(runner, id);
