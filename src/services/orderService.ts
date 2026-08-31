@@ -5,6 +5,7 @@ import { withTransaction } from "../db/tx.js";
 import { WhereBuilder } from "../db/where.js";
 import type { Order, OrderItem, MenuItem, CollectionWindow, OrderStatus, Kitchen } from "../db/schema.js";
 import { ApiError } from "../middleware/errorHandler.js";
+import { isUniqueViolationOn } from "../db/errors.js";
 
 /**
  * Who an order belongs to. EXACTLY ONE of these two shapes, never both and
@@ -576,11 +577,19 @@ async function hydrateOrders<T extends { id: string; studentId: string | null }>
 // Create
 // ---------------------------------------------------------------------------
 
-/** One Postgres sequence per kitchen. Each kitchen calls its own numbers. */
-const ORDER_NUMBER_SEQUENCE: Record<string, string> = {
-  SNACKS: "order_number_snacks",
-  MEALS: "order_number_meals",
-};
+/**
+ * A random 4-digit token, shoutable at the counter. Uniqueness among a
+ * kitchen's still-open orders is NOT enforced here — that's the partial
+ * unique index on Order("kitchen", "orderNumber"); a collision surfaces as
+ * 23505 and insertOrders() retries with a fresh number instead of this
+ * function coordinating anything.
+ */
+function randomOrderNumber(): number {
+  return 1000 + Math.floor(Math.random() * 9000);
+}
+
+/** insertOrders() retries this many times before giving up on a collision. */
+const MAX_ORDER_NUMBER_ATTEMPTS = 8;
 
 /** MenuItem plus the kitchen its category routes it to — the join createOrder needs. */
 interface MenuItemWithCategory extends MenuItem {
@@ -618,11 +627,6 @@ async function insertOrders(
   reservedAt: Date,
   expiresAt: Date,
 ): Promise<Map<string, { orderNumber: number; createdAt: Date }>> {
-  const orderRows = joinSql(
-    drafts.map(
-      (d) => sql`(${d.id}::text, ${d.kitchen}::text, ${d.token}::text, ${ORDER_NUMBER_SEQUENCE[d.kitchen] ?? ORDER_NUMBER_SEQUENCE.SNACKS}::text, ${d.totalAmount}::text)`,
-    ),
-  );
   const itemRows = joinSql(
     drafts.flatMap((d) =>
       d.lines.map(
@@ -632,40 +636,70 @@ async function insertOrders(
     ),
   );
 
-  const { rows: inserted } = await query<{ id: string; orderNumber: number; createdAt: Date }>(
-    db,
-    sql`
-    WITH new_orders AS (
-      INSERT INTO "Order" (
-        "id", "studentId", "guestSessionId", "guestName", "guestPhone",
-        "kitchen", "token", "orderNumber", "totalAmount",
-        "collectionAt", "reservedAt", "reservationExpiresAt"
-      )
-      SELECT v.id,
-             ${ownerData.studentId}::text,
-             ${ownerData.guestSessionId}::text,
-             ${ownerData.guestName}::text,
-             ${ownerData.guestPhone}::text,
-             v.kitchen::"Kitchen",
-             v.token,
-             nextval(v.seq::regclass)::int,
-             v.total::numeric(10, 2),
-             ${slot ? slot.toISOString() : null}::timestamp,
-             ${reservedAt.toISOString()}::timestamp,
-             ${expiresAt.toISOString()}::timestamp
-        FROM (VALUES ${orderRows}) AS v(id, kitchen, token, seq, total)
-      RETURNING "id", "orderNumber", "createdAt"
-    ), new_items AS (
-      INSERT INTO "OrderItem" ("id", "orderId", "menuItemId", "quantity", "priceAtOrder")
-      SELECT w.id, w."orderId", w."menuItemId", w.qty, w.price::numeric(10, 2)
-        FROM (VALUES ${itemRows}) AS w(id, "orderId", "menuItemId", qty, price)
-      RETURNING "id"
-    )
-    SELECT "id", "orderNumber", "createdAt" FROM new_orders
-  `,
-  );
+  // A collision (two open orders in the same kitchen drawing the same
+  // 4-digit number) is rare but not impossible — the partial unique index on
+  // Order("kitchen", "orderNumber") is what actually catches it, named
+  // explicitly below so this only retries ON THAT constraint. Order also has
+  // a separate UNIQUE index on "token" (a fresh randomUUID() per draft); a
+  // 23505 from that — or any future unique constraint on the table — must
+  // not be swallowed as "just re-roll the number" and looped on uselessly.
+  //
+  // At realistic volumes the retry is essentially never needed: with N open
+  // orders in a kitchen sharing the 9000-number space, a fresh draw collides
+  // with probability N/9000, so even N=300 open orders (already high for a
+  // canteen — PENDING/PREPARING/COOKED only, expiring within hours) fails
+  // all 8 attempts with probability ~0.033^8, effectively zero.
+  const ORDER_NUMBER_CONSTRAINT = "Order_kitchen_orderNumber_open_key";
+  for (let attempt = 1; attempt <= MAX_ORDER_NUMBER_ATTEMPTS; attempt++) {
+    const orderRows = joinSql(
+      drafts.map(
+        (d) =>
+          sql`(${d.id}::text, ${d.kitchen}::text, ${d.token}::text, ${randomOrderNumber()}::int, ${d.totalAmount}::text)`,
+      ),
+    );
 
-  return new Map(inserted.map((row) => [row.id, { orderNumber: row.orderNumber, createdAt: row.createdAt }]));
+    try {
+      const { rows: inserted } = await query<{ id: string; orderNumber: number; createdAt: Date }>(
+        db,
+        sql`
+        WITH new_orders AS (
+          INSERT INTO "Order" (
+            "id", "studentId", "guestSessionId", "guestName", "guestPhone",
+            "kitchen", "token", "orderNumber", "totalAmount",
+            "collectionAt", "reservedAt", "reservationExpiresAt"
+          )
+          SELECT v.id,
+                 ${ownerData.studentId}::text,
+                 ${ownerData.guestSessionId}::text,
+                 ${ownerData.guestName}::text,
+                 ${ownerData.guestPhone}::text,
+                 v.kitchen::"Kitchen",
+                 v.token,
+                 v.num,
+                 v.total::numeric(10, 2),
+                 ${slot ? slot.toISOString() : null}::timestamp,
+                 ${reservedAt.toISOString()}::timestamp,
+                 ${expiresAt.toISOString()}::timestamp
+            FROM (VALUES ${orderRows}) AS v(id, kitchen, token, num, total)
+          RETURNING "id", "orderNumber", "createdAt"
+        ), new_items AS (
+          INSERT INTO "OrderItem" ("id", "orderId", "menuItemId", "quantity", "priceAtOrder")
+          SELECT w.id, w."orderId", w."menuItemId", w.qty, w.price::numeric(10, 2)
+            FROM (VALUES ${itemRows}) AS w(id, "orderId", "menuItemId", qty, price)
+          RETURNING "id"
+        )
+        SELECT "id", "orderNumber", "createdAt" FROM new_orders
+      `,
+      );
+
+      return new Map(inserted.map((row) => [row.id, { orderNumber: row.orderNumber, createdAt: row.createdAt }]));
+    } catch (err) {
+      if (!isUniqueViolationOn(err, ORDER_NUMBER_CONSTRAINT) || attempt === MAX_ORDER_NUMBER_ATTEMPTS) throw err;
+    }
+  }
+
+  // Unreachable — the loop above always returns or throws.
+  throw new ApiError(500, "ORDER_NUMBER_EXHAUSTED", "Could not assign an order number");
 }
 
 /**

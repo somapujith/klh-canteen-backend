@@ -4,9 +4,23 @@ function pgCode(err: unknown): string | undefined {
   return (err as { code?: string } | null)?.code;
 }
 
+function pgConstraint(err: unknown): string | undefined {
+  return (err as { constraint?: string } | null)?.constraint;
+}
+
 /** Postgres 23505 unique_violation — replaces Prisma's P2002. */
 export function isUniqueViolation(err: unknown): boolean {
   return pgCode(err) === "23505";
+}
+
+/**
+ * A 23505 naming this specific constraint. Use when a statement could
+ * violate more than one unique constraint and only one of them is meant to
+ * be retryable — retrying on any 23505 would silently loop on an unrelated
+ * violation instead of surfacing it.
+ */
+export function isUniqueViolationOn(err: unknown, constraintName: string): boolean {
+  return isUniqueViolation(err) && pgConstraint(err) === constraintName;
 }
 
 /** Postgres 23503 foreign_key_violation — replaces Prisma's P2003/P2014. */
