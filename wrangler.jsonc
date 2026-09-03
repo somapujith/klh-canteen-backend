@@ -31,11 +31,16 @@
     // only after the SAFEUPI_* secrets below are set — paymentsEnabled()
     // requires both the flag and the credentials, so a flag-only deploy
     // presents no checkout rather than one that cannot settle.
-    "PAYMENTS_ENABLED": "false",
+    "PAYMENTS_ENABLED": "true",
     // Where SafeUPI returns the student's browser after the hosted payment
     // page. A public frontend URL, so it belongs in vars rather than a secret.
     // The payment id is appended as a query parameter at create time.
-    "SAFEUPI_REDIRECT_URL": "http://localhost:5175/payment/complete"
+    //
+    // This is the DEPLOYED frontend, not a dev server: SafeUPI redirects a real
+    // browser here from its own origin, so a localhost value would strand every
+    // student on a page their phone cannot reach. Local development overrides it
+    // through .env instead of editing this file.
+    "SAFEUPI_REDIRECT_URL": "https://rajasbakery.in/payment/complete"
   },
 
   // Sensitive values are NOT set here. Before first deploy, run:
