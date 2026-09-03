@@ -252,6 +252,17 @@ const statusLimiter = rateLimit({
 });
 
 /**
+ * Floor between two live gateway reconciliation calls for the SAME payment.
+ *
+ * The endpoint above is polled far more often than this — every 2s from the
+ * client — but there is no reason to ask SafeUPI the same question that
+ * often: observed confirmation times for this merchant range from ~20s to
+ * 500s+, so a fresh answer every 5s already tracks their pace closely without
+ * multiplying request volume by roughly 2.5x for no benefit.
+ */
+const RECONCILE_MIN_INTERVAL_MS = 5_000;
+
+/**
  * Where the client waits while the student pays.
  *
  * A still-PENDING payment triggers a reconciliation call to the gateway,
@@ -274,7 +285,14 @@ paymentsRouter.get("/:id", optionalStudentAuth, statusLimiter, async (c) => {
     // gateway about a QR nobody can scan any more.
     if (payment.expiresAt && payment.expiresAt.getTime() < Date.now()) {
       await expireStalePayments(pool);
-    } else {
+    } else if (Date.now() - payment.updatedAt.getTime() >= RECONCILE_MIN_INTERVAL_MS) {
+      // Throttled to one live gateway call per interval, not one per poll.
+      // The frontend polls every 2s and a slow settlement can run for minutes
+      // — unthrottled, that is roughly 250+ calls to SafeUPI asking the same
+      // question the webhook will eventually answer anyway. It never shortens
+      // their confirmation time (that delay is entirely on their side) and
+      // needlessly hammers their API, which for all we know is itself part of
+      // why their reconciliation is slow and inconsistent for this merchant.
       try {
         const settled = await reconcileWithGateway(pool, bindings, payment);
         if (settled?.changed) await broadcastSettlement(c, settled);
