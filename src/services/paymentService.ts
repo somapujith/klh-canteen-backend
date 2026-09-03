@@ -1286,3 +1286,81 @@ export async function expireStalePayments(pool: Pool): Promise<number> {
     return 0;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Webhook forensics
+// ---------------------------------------------------------------------------
+
+/**
+ * Records a delivery exactly as it arrived, minus the shared secret.
+ *
+ * This is evidence, not application state: nothing reads it to make a
+ * decision. It exists so that "the student says they paid but the order never
+ * confirmed" is an answerable question — did SafeUPI send a success we
+ * mishandled, or did they never send one? Without the raw body that is pure
+ * speculation, because the request is gone once it returns.
+ *
+ * Best-effort by construction. A webhook must still be processed and 200-ed
+ * even if this write fails; losing the audit trail is far better than making
+ * the gateway retry a settlement that already happened.
+ */
+export async function recordWebhook(
+  db: RawRunner,
+  payload: unknown,
+  authenticated: boolean,
+  outcome: string | null,
+): Promise<void> {
+  try {
+    const body = (payload ?? {}) as Record<string, any>;
+    // Never store the secret: it is the credential that authenticates a
+    // settlement, and a copy in the database is a copy an attacker can read.
+    const { secret, ...safe } = body;
+    const data = (safe.data ?? {}) as Record<string, any>;
+
+    await query(
+      db,
+      sql`
+        INSERT INTO "WebhookLog" ("id","event","status","merchantOrderId","systemOrderId","payload","authenticated","outcome")
+        VALUES (
+          ${crypto.randomUUID()}::text,
+          ${typeof safe.event === "string" ? safe.event : null}::text,
+          ${typeof data.status === "string" ? data.status : null}::text,
+          ${typeof data.merchant_order_id === "string" ? data.merchant_order_id : null}::text,
+          ${typeof data.system_order_id === "string" ? data.system_order_id : null}::text,
+          ${JSON.stringify(safe)}::jsonb,
+          ${authenticated}::boolean,
+          ${outcome}::text
+        )
+      `,
+    );
+  } catch (err) {
+    console.error("[payments] failed to record webhook", err);
+  }
+}
+
+/** Stamps what we decided onto the row just written for this delivery. */
+export async function recordWebhookOutcome(
+  db: RawRunner,
+  payload: unknown,
+  outcome: string | null,
+): Promise<void> {
+  try {
+    const data = ((payload as any)?.data ?? {}) as Record<string, any>;
+    const ref = typeof data.merchant_order_id === "string" ? data.merchant_order_id : null;
+    if (!ref) return;
+    await query(
+      db,
+      sql`
+        UPDATE "WebhookLog"
+           SET "outcome" = ${outcome}::text
+         WHERE "id" = (
+           SELECT "id" FROM "WebhookLog"
+            WHERE "merchantOrderId" = ${ref}::text AND "outcome" IS NULL
+            ORDER BY "receivedAt" DESC LIMIT 1
+         )
+      `,
+    );
+  } catch (err) {
+    console.error("[payments] failed to record webhook outcome", err);
+  }
+}

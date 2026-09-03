@@ -14,6 +14,8 @@ import {
   initiatePayment,
   paymentsEnabled,
   releaseUnpaidOrders,
+  recordWebhook,
+  recordWebhookOutcome,
   reconcileWithGateway,
   verifyWebhook,
   type PaymentRow,
@@ -332,6 +334,24 @@ paymentsRouter.post("/webhook", async (c) => {
 
   const body = payload as { secret?: unknown };
   const verification = verifyWebhook(config.webhookSecret, body.secret);
+  const pool = getRequestPool(c);
+
+  /**
+   * Record the delivery before acting on it.
+   *
+   * A payment that fails "somewhere between the UPI app and the order" is
+   * otherwise unanswerable after the fact — the request body is the only
+   * evidence of what SafeUPI actually said, and it is gone once the request
+   * ends. Written for rejected deliveries too: a run of unauthenticated ones
+   * means either someone is probing the endpoint or the dashboard secret has
+   * drifted from ours, and both are invisible without this.
+   *
+   * The secret is stripped first. It is a bearer credential, and storing it
+   * would put in the database exactly the value that lets anyone forge a
+   * settlement.
+   */
+  await recordWebhook(pool, payload, verification.ok, null);
+
   if (!verification.ok) {
     // Logged without the body: an unverified payload is attacker-controlled,
     // and in this scheme the body carries a credential — logging it would leak
@@ -340,9 +360,9 @@ paymentsRouter.post("/webhook", async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const pool = getRequestPool(c);
   // `config` is what turns on the Status API confirmation — see applyWebhook.
   const result = await applyWebhook(pool, payload as WebhookPayload, { config });
+  await recordWebhookOutcome(pool, payload, result.status ?? result.reason ?? null);
 
   if (!result.changed) {
     // Duplicate, unmatched, or already terminal. All are 200: the delivery was
