@@ -40,7 +40,11 @@
     // browser here from its own origin, so a localhost value would strand every
     // student on a page their phone cannot reach. Local development overrides it
     // through .env instead of editing this file.
-    "SAFEUPI_REDIRECT_URL": "https://rajasbakery.in/payment/complete"
+    // www, not the bare domain: rajasbakery.in 308-redirects to www, and an
+    // extra hop through a UPI app's in-app browser is where a query string
+    // goes missing — which would strip the ?payment= id the completion page
+    // needs to know which payment to confirm.
+    "SAFEUPI_REDIRECT_URL": "https://www.rajasbakery.in/payment/complete"
   },
 
   // Sensitive values are NOT set here. Before first deploy, run:
