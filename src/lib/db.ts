@@ -79,9 +79,38 @@ export function getPool(databaseUrl: string): Pool {
  */
 let cachedHttpSql: { url: string; runner: QueryRunner } | undefined;
 
+/**
+ * Neon's HTTP transport reaches a `*.neon.tech` REST endpoint rather than
+ * opening a socket, so it cannot address a plain Postgres — including the
+ * local one the test suite runs against, where it fails as
+ * `NeonDbError: Error connecting to database: TypeError: fetch failed`.
+ *
+ * The WebSocket driver can be redirected at a proxy (see
+ * tests/setup/testEnv.ts) but that proxy speaks only WebSockets, so there is
+ * nothing for `fetchEndpoint` to point at. Against a local target the pool is
+ * used instead: same database, same statements, and the HTTP transport was
+ * only ever a serverless round-trip optimisation rather than a behaviour this
+ * code depends on.
+ */
+function isLocalPostgres(databaseUrl: string): boolean {
+  try {
+    const host = new URL(databaseUrl).hostname;
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
 export function getHttpSql(databaseUrl: string): QueryRunner {
   if (!databaseUrl) throw new Error("DATABASE_URL not set");
   if (cachedHttpSql && cachedHttpSql.url === databaseUrl) return cachedHttpSql.runner;
+
+  if (isLocalPostgres(databaseUrl)) {
+    const pool = getPool(databaseUrl);
+    const runner: QueryRunner = { query: (text, values) => pool.query(text, values as any[]) as any };
+    cachedHttpSql = { url: databaseUrl, runner };
+    return runner;
+  }
 
   const sql = neon(databaseUrl, { fullResults: true });
   const runner: QueryRunner = {

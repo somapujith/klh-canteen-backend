@@ -133,4 +133,9 @@ function configureNeonForLocalPostgres(target: ParsedTarget): void {
   // Node does not expose a global WebSocket in every supported version, so the
   // driver is handed one explicitly rather than left to discover one.
   neonConfig.webSocketConstructor = WebSocket;
+
+  // Neon's OTHER transport — the HTTP one behind lib/db.ts's getHttpSql() —
+  // is not redirected here, because wsproxy speaks only WebSockets and there
+  // is no HTTP SQL endpoint for it to point at. getHttpSql() falls back to the
+  // pool for a local target instead; see the note there.
 }

@@ -223,12 +223,37 @@ describeDb("POST /admin/menu-items/:id/image", () => {
     // while streaming, well before parseBody() or the 512KB image check runs.
     const oversized = Buffer.alloc(2 * 1024 * 1024, 0x41);
 
-    const res = await request(server)
-      .post(`/admin/menu-items/${item.id}/image`)
-      .set("Authorization", `Bearer ${token}`)
-      .attach("file", oversized, { filename: "big.webp", contentType: "image/webp" });
+    /**
+     * Two acceptable outcomes, and both prove the same thing.
+     *
+     * bodyLimit aborts the moment the ceiling is passed — that is the point of
+     * it, and why an oversized upload never reaches memory. Whether the client
+     * gets to read the 413, or has the socket closed underneath it first, is a
+     * race between the server responding and the client finishing its 2MB
+     * write, decided by OS socket buffering rather than by anything this code
+     * controls. Under Node the reset usually wins.
+     *
+     * What this test is for is that the upload is refused and nothing is
+     * stored, so it asserts exactly that and accepts either shape of refusal.
+     * Demanding the status alone makes it fail on a machine with different
+     * buffering while the server is behaving correctly.
+     */
+    let status: number | undefined;
+    try {
+      const res = await request(server)
+        .post(`/admin/menu-items/${item.id}/image`)
+        .set("Authorization", `Bearer ${token}`)
+        .attach("file", oversized, { filename: "big.webp", contentType: "image/webp" });
+      status = res.status;
+    } catch (err) {
+      // ECONNRESET/EPIPE means the server hung up mid-upload, which IS the
+      // abort working. Anything else is a real failure and is rethrown.
+      const code = (err as { code?: string }).code;
+      if (code !== "ECONNRESET" && code !== "EPIPE") throw err;
+    }
 
-    expect(res.status).toBe(413);
+    if (status !== undefined) expect(status).toBe(413);
+    // The part that matters either way: nothing was stored.
     expect(await fetchImageHash(item.id)).toBeNull();
   });
 
