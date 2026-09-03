@@ -33,6 +33,16 @@ interface CreateOrderInput {
    * must win a seat in that slot's capacity ledger.
    */
   collectionAt?: Date | null;
+  /**
+   * Holds the order back from the kitchen until a payment settles it.
+   *
+   * Stock is claimed either way — the reservation is what stops the cart being
+   * sold out from under a student during the two-minute payment window — but
+   * an order flagged here is invisible to the board and to the admin stats
+   * until services/paymentService.ts clears the flag on a confirmed webhook.
+   * Defaults to false, so every existing caller keeps today's behaviour.
+   */
+  awaitingPayment?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -626,6 +636,7 @@ async function insertOrders(
   slot: Date | null,
   reservedAt: Date,
   expiresAt: Date,
+  awaitingPayment: boolean,
 ): Promise<Map<string, { orderNumber: number; createdAt: Date }>> {
   const itemRows = joinSql(
     drafts.flatMap((d) =>
@@ -666,7 +677,7 @@ async function insertOrders(
           INSERT INTO "Order" (
             "id", "studentId", "guestSessionId", "guestName", "guestPhone",
             "kitchen", "token", "orderNumber", "totalAmount",
-            "collectionAt", "reservedAt", "reservationExpiresAt"
+            "collectionAt", "reservedAt", "reservationExpiresAt", "awaitingPayment"
           )
           SELECT v.id,
                  ${ownerData.studentId}::text,
@@ -679,7 +690,8 @@ async function insertOrders(
                  v.total::numeric(10, 2),
                  ${slot ? slot.toISOString() : null}::timestamp,
                  ${reservedAt.toISOString()}::timestamp,
-                 ${expiresAt.toISOString()}::timestamp
+                 ${expiresAt.toISOString()}::timestamp,
+                 ${awaitingPayment}::boolean
             FROM (VALUES ${orderRows}) AS v(id, kitchen, token, num, total)
           RETURNING "id", "orderNumber", "createdAt"
         ), new_items AS (
@@ -738,7 +750,7 @@ async function insertOrders(
  */
 export async function createOrder(
   pool: Pool,
-  { owner, items, collectionAt }: CreateOrderInput,
+  { owner, items, collectionAt, awaitingPayment = false }: CreateOrderInput,
 ) {
   if (items.length === 0) throw new ApiError(400, "EMPTY_ORDER", "Order must have at least one item");
   assertSingleOwner(owner);
@@ -867,6 +879,7 @@ export async function createOrder(
     seenAt: null,
     lockedByAdminId: null,
     lockedAt: null,
+    awaitingPayment,
     student,
     items: draft.lines.map((line) => {
       // `categoryKitchen` was joined only to route the line to a kitchen; the
@@ -904,7 +917,7 @@ export async function createOrder(
     }
 
     // ---- statement 2: write the orders and their items -------------------
-    const written = await insertOrders(pool, drafts, ownerData, slot, reservedAt, expiresAt);
+    const written = await insertOrders(pool, drafts, ownerData, slot, reservedAt, expiresAt, awaitingPayment);
     wrote = true;
 
     orders = drafts.map((draft) => {
@@ -1110,6 +1123,13 @@ export async function getAllOrders(pool: Pool, options: OrderPageOptions = {}) {
   const includesDelivered = statuses ? statuses.includes("DELIVERED") : true;
 
   const where = new WhereBuilder();
+  // An order whose payment has not settled does not exist as far as the
+  // kitchen is concerned. It holds its stock, so nobody else can buy the food
+  // out from under it, but it is not cooked and not counted until the webhook
+  // confirms — and if the payment window lapses instead, it is cancelled and
+  // the portions go back. Orders placed while payments are switched off carry
+  // FALSE here and are unaffected.
+  where.and(`"awaitingPayment" = FALSE`);
   if (options.kitchen) where.and(`"kitchen" = $1::"Kitchen"`, options.kitchen);
   if (statuses) where.and(`"status"::text = ANY($1::text[])`, statuses);
 
@@ -1167,6 +1187,9 @@ export async function getAdminStats(pool: Pool, kitchen?: string) {
   // ISO-UTC strings cast to `::timestamp`, not raw Date params — see the
   // comment on getCollectionWindows.
   where.and(`"createdAt" >= $1::timestamp AND "createdAt" <= $2::timestamp`, startOfDay.toISOString(), endOfDay.toISOString());
+  // Money that has not arrived is not revenue. An unsettled order is excluded
+  // from both the count and the total until its payment confirms.
+  where.and(`"awaitingPayment" = FALSE`);
   if (kitchen) where.and(`"kitchen" = $1::"Kitchen"`, kitchen);
 
   // Only the money column is needed — the previous full-row fetch dragged
@@ -1261,15 +1284,22 @@ export async function openOrderForAdmin(pool: Pool, orderId: string, adminId: st
 
 export async function updateOrderStatus(pool: Pool, orderId: string, targetStatus: string, adminKitchen?: string | null) {
   return withTransaction(pool, async (client) => {
-    const { rows: existingRows } = await query<{ status: OrderStatus; kitchen: Kitchen }>(
+    const { rows: existingRows } = await query<{ status: OrderStatus; kitchen: Kitchen; awaitingPayment: boolean }>(
       client,
-      sql`SELECT "status", "kitchen" FROM "Order" WHERE "id" = ${orderId}::text FOR UPDATE`,
+      sql`SELECT "status", "kitchen", "awaitingPayment" FROM "Order" WHERE "id" = ${orderId}::text FOR UPDATE`,
     );
     if (existingRows.length === 0) throw new ApiError(404, "NOT_FOUND", "Order not found");
     const existing = existingRows[0];
 
     if (adminKitchen && existing.kitchen !== adminKitchen) {
       throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to update this kitchen's orders.");
+    }
+    // Belt and braces: getAllOrders already hides unsettled orders, so an
+    // admin has no way to see this one. Refused here as well because the cost
+    // of the check is nothing and the cost of being wrong is food handed over
+    // for money that never arrived.
+    if (existing.awaitingPayment) {
+      throw new ApiError(409, "AWAITING_PAYMENT", "This order has not been paid for yet.");
     }
     if (existing.status === "DELIVERED") {
       throw new ApiError(409, "ALREADY_DELIVERED", "Order was already delivered");

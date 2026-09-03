@@ -9,6 +9,7 @@ import {
   MAX_PREBOOK_DAYS,
 } from "../services/orderService.js";
 import { issueGuestSession, verifyGuestSession } from "../services/guestSessionService.js";
+import { paymentsEnabled } from "../services/paymentService.js";
 import { loginGuestWithGoogle } from "../services/googleGuestService.js";
 import { emitOrderCreated } from "../services/sseService.js";
 import { toOrderSummary } from "../lib/orderSummary.js";
@@ -211,6 +212,10 @@ guestRouter.post("/orders", requireGuestSession, guestOrderLimiter, async (c) =>
   const bindings = getBindings(c);
   const guestSessionId = c.get("guestSessionId")!;
 
+  // Same rule as the student route: with payments on the order holds its stock
+  // but stays invisible to the kitchen until a verified webhook settles it.
+  const awaitingPayment = paymentsEnabled(bindings);
+
   const orders = await createOrder(pool, {
     owner: {
       guestSessionId,
@@ -219,9 +224,14 @@ guestRouter.post("/orders", requireGuestSession, guestOrderLimiter, async (c) =>
     },
     items: body.items,
     collectionAt: body.collectionAt ? new Date(body.collectionAt) : null,
+    awaitingPayment,
   });
 
-  await emitOrderCreated(bindings, orders.map(toOrderSummary));
+  // Not announced while unpaid — the board cannot see it, so a frame here would
+  // add a row that the next refetch removes. The payment webhook emits it.
+  if (!awaitingPayment) {
+    await emitOrderCreated(bindings, orders.map(toOrderSummary));
+  }
   return c.json(orders.map(serializeOrder), 201);
 });
 
