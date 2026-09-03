@@ -28,16 +28,14 @@
     "GOOGLE_CLIENT_ID_GUEST": "507951128349-7i31je511nega9ruvngftgvpa58rav4c.apps.googleusercontent.com",
     // UPI payments master switch. "false" leaves ordering exactly as it was
     // before payments existed; "true" makes checkout require payment. Flip it
-    // only after the three VYAPAR_* secrets below are set — paymentsEnabled()
+    // only after the SAFEUPI_* secrets below are set — paymentsEnabled()
     // requires both the flag and the credentials, so a flag-only deploy
     // presents no checkout rather than one that cannot settle.
     "PAYMENTS_ENABLED": "false",
-    // Our own webhook endpoint, sent as callback_url on every create_order.
-    // Must be publicly reachable — the gateway's servers call it, not the
-    // browser. Not a secret (the gateway signs what it sends there, and the
-    // signature is what authenticates it), so it lives here where it is easy
-    // to point a staging deploy at itself.
-    "VYAPAR_CALLBACK_URL": "https://klh-canteen-backend.workers.dev/payments/webhook"
+    // Where SafeUPI returns the student's browser after the hosted payment
+    // page. A public frontend URL, so it belongs in vars rather than a secret.
+    // The payment id is appended as a query parameter at create time.
+    "SAFEUPI_REDIRECT_URL": "http://localhost:5175/payment/complete"
   },
 
   // Sensitive values are NOT set here. Before first deploy, run:
@@ -47,14 +45,15 @@
   //   wrangler secret put TELEGRAM_BOT_TOKEN
   //   wrangler secret put TELEGRAM_BOT_USERNAME
   //   wrangler secret put TELEGRAM_WEBHOOK_SECRET
-  //   wrangler secret put VYAPAR_API_KEY          (vg_live_...)
-  //   wrangler secret put VYAPAR_WEBHOOK_SECRET   (whsec_...)
+  //   wrangler secret put SAFEUPI_API_SECRET
+  //   wrangler secret put SAFEUPI_WEBHOOK_SECRET
   // These populate env.* at runtime without ever being committed to source control.
   //
-  // VYAPAR_WEBHOOK_SECRET is the HMAC key every inbound payment notification is
-  // verified against. It is the only thing separating a real "payment.success"
-  // from anyone who has guessed the webhook URL, so it belongs nowhere but a
-  // secret — never in this file, never in a commit, never in a screenshot.
+  // SAFEUPI_WEBHOOK_SECRET is NOT a signing key — SafeUPI does not sign its
+  // webhooks, it echoes this value back in the request body. That makes it a
+  // bearer credential: anything that ever logs a webhook body leaks it. It
+  // belongs nowhere but a secret, and every settlement is additionally
+  // confirmed against SafeUPI's Status API before food is released.
 
   // Retained only for any non-rate-limit use. Rate limit counters moved off
   // KV to the RATE_LIMITER_HUB Durable Object below: KV's get-then-put is not

@@ -1,27 +1,28 @@
-import { describe, it, expect, beforeEach, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
 import request from "supertest";
 import bcrypt from "bcryptjs";
 import { signToken } from "../src/lib/jwt.js";
 
 import { describeDb, getTestPool, resetDatabase, disconnectTestPrisma, testDb } from "./helpers/db.js";
 import { startTestServer, closeTestServer } from "./helpers/app.js";
-import { computeWebhookSignature, releaseUnpaidOrders } from "../src/services/paymentService.js";
+import { releaseUnpaidOrders } from "../src/services/paymentService.js";
 import { sql, query } from "../src/db/sql.js";
 import * as userRepo from "../src/db/userRepo.js";
 import * as categoryRepo from "../src/db/categoryRepo.js";
 import * as menuItemRepo from "../src/db/menuItemRepo.js";
 
 /**
- * Settlement, end to end, without the gateway.
+ * Settlement, end to end, without a live merchant.
  *
- * The one thing VyaparGateway is needed for is `create_order` — obtaining a
- * QR. Everything that happens AFTER the money moves is ours, and it is the
- * part that actually releases food, so it is proved here by signing webhooks
- * with the test secret and posting them at the real endpoint.
+ * SafeUPI is needed only to obtain a payment link. Everything that happens
+ * after the money moves is ours, and it is the half that actually releases
+ * food, so it is proved here by posting webhooks at the real endpoint with
+ * SafeUPI's Status API stubbed.
  *
- * What that covers: an unpaid order stays invisible to the kitchen, a valid
- * webhook confirms it, a replay changes nothing, a tampered amount is refused,
- * a failure hands the stock back, and a forged signature is rejected outright.
+ * BOTH sides are controlled on purpose. SafeUPI's webhook is unsigned, so the
+ * delivery alone is only a claim; applyWebhook confirms it against the Status
+ * API before releasing anything. Several tests below make the two disagree,
+ * because that disagreement is the forged-webhook case.
  */
 
 /**
@@ -37,7 +38,7 @@ process.env.PAYMENTS_ENABLED = "true";
 const pool = testDb.enabled ? getTestPool() : (undefined as any);
 const server = testDb.enabled ? await startTestServer() : (undefined as any);
 
-/** Matches VYAPAR_WEBHOOK_SECRET in .env.test — deliberately not the real one. */
+/** Matches SAFEUPI_WEBHOOK_SECRET in .env.test — deliberately not real. */
 const WEBHOOK_SECRET = "whsec_test_secret_not_real_do_not_use";
 
 async function makeStudent() {
@@ -122,18 +123,79 @@ async function seedAwaitingPayment(options: { qty?: number; amount?: string; pri
   return { student, item, paymentId, orderId, clientTxnId, amount, qty };
 }
 
-/** Posts a webhook signed the way the gateway signs one: over the raw bytes. */
-async function postWebhook(payload: Record<string, unknown>, options: { secret?: string; timestamp?: string } = {}) {
-  const body = JSON.stringify(payload);
-  const timestamp = options.timestamp ?? String(Math.floor(Date.now() / 1000));
-  const signature = await computeWebhookSignature(options.secret ?? WEBHOOK_SECRET, timestamp, body);
+/**
+ * What SafeUPI's Status API will claim on the next call.
+ *
+ * applyWebhook confirms every settlement against that endpoint before it
+ * releases anything, so these tests must control BOTH sides: the delivery, and
+ * the gateway's own answer. That is the point — a webhook alone proves nothing
+ * here, which is precisely the property being tested.
+ */
+let gatewayTruth: { status: string; amount: string | number; utr?: string | null } | null = null;
+/** Set to make the Status API call fail, as an unreachable gateway would. */
+let gatewayUnreachable = false;
 
+const realFetch = globalThis.fetch;
+
+beforeAll(() => {
+  globalThis.fetch = (async (input: any, init?: any) => {
+    const url = String(typeof input === "string" ? input : input?.url ?? "");
+    if (url.includes("safeupi.com/api/order/status")) {
+      if (gatewayUnreachable) throw new TypeError("fetch failed");
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (!gatewayTruth) {
+        return new Response(JSON.stringify({ success: false, message: "Order not found" }), { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({
+          success: true,
+          message: "Order status retrieved successfully",
+          data: {
+            id: 1,
+            system_order_id: `SU-${body.merchant_order_id}`,
+            merchant_order_id: body.merchant_order_id,
+            status: gatewayTruth.status,
+            amount: String(gatewayTruth.amount),
+            payment: { utr: gatewayTruth.utr ?? "100852466451", customer_vpa: "student@upi" },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    return realFetch(input, init);
+  }) as typeof globalThis.fetch;
+});
+
+afterAll(() => {
+  globalThis.fetch = realFetch;
+});
+
+/**
+ * Posts a webhook the way SafeUPI does: a plain JSON body carrying the shared
+ * secret. There is no signature to compute — that is the whole reason the
+ * Status API confirmation exists.
+ */
+async function postWebhook(
+  payload: Record<string, unknown>,
+  options: { secret?: string } = {},
+) {
   return request(server)
     .post("/payments/webhook")
     .set("Content-Type", "application/json")
-    .set("X-VyaparGateway-Signature", signature)
-    .set("X-VyaparGateway-Timestamp", timestamp)
-    .send(body);
+    .send({ ...payload, secret: options.secret ?? WEBHOOK_SECRET });
+}
+
+/** A SafeUPI webhook body for one payment. */
+function webhookBody(event: string, clientTxnId: string, extra: Record<string, unknown> = {}) {
+  return {
+    event,
+    data: {
+      status: event,
+      merchant_order_id: clientTxnId,
+      system_order_id: `SU-${clientTxnId}`,
+      ...extra,
+    },
+  };
 }
 
 async function readOrder(orderId: string) {
@@ -191,16 +253,8 @@ describeDb("payment settlement", () => {
   it("confirms the order on a valid payment.success", async () => {
     const { orderId, paymentId, clientTxnId, amount, item, qty } = await seedAwaitingPayment();
 
-    const res = await postWebhook({
-      event: "payment.success",
-      status: "success",
-      client_txn_id: clientTxnId,
-      amount: Number(amount),
-      upi_txn_id: "403993715517",
-      payer_vpa: "student@upi",
-      idempotency_key: "idem-success-1",
-      timestamp: Math.floor(Date.now() / 1000),
-    });
+    gatewayTruth = { status: "success", amount, utr: "403993715517" };
+    const res = await postWebhook(webhookBody("success", clientTxnId));
 
     expect(res.status).toBe(200);
 
@@ -222,14 +276,8 @@ describeDb("payment settlement", () => {
   it("treats a replayed delivery as a no-op", async () => {
     const { orderId, paymentId, clientTxnId, amount, item, qty } = await seedAwaitingPayment();
 
-    const payload = {
-      event: "payment.success",
-      status: "success",
-      client_txn_id: clientTxnId,
-      amount: Number(amount),
-      upi_txn_id: "403993715517",
-      idempotency_key: "idem-replay-1",
-    };
+    gatewayTruth = { status: "success", amount, utr: "403993715517" };
+    const payload = webhookBody("success", clientTxnId);
 
     const first = await postWebhook(payload);
     const second = await postWebhook(payload);
@@ -253,15 +301,9 @@ describeDb("payment settlement", () => {
   it("refuses a success whose amount does not match, and releases the order", async () => {
     const { orderId, paymentId, clientTxnId, item } = await seedAwaitingPayment({ qty: 2, price: "15.00" });
 
-    // Signed correctly, but claiming ₹1 against a ₹30 order.
-    const res = await postWebhook({
-      event: "payment.success",
-      status: "success",
-      client_txn_id: clientTxnId,
-      amount: 1,
-      upi_txn_id: "wrong-amount",
-      idempotency_key: "idem-mismatch-1",
-    });
+    // The gateway itself reports ₹1 against a ₹30 order.
+    gatewayTruth = { status: "success", amount: "1.00", utr: "wrong-amount" };
+    const res = await postWebhook(webhookBody("success", clientTxnId));
 
     expect(res.status).toBe(200);
 
@@ -278,12 +320,8 @@ describeDb("payment settlement", () => {
   it("cancels the order and returns stock on payment.failed", async () => {
     const { orderId, paymentId, clientTxnId, item } = await seedAwaitingPayment();
 
-    const res = await postWebhook({
-      event: "payment.failed",
-      status: "failed",
-      client_txn_id: clientTxnId,
-      idempotency_key: "idem-failed-1",
-    });
+    gatewayTruth = { status: "failed", amount: "0.00", utr: null };
+    const res = await postWebhook(webhookBody("failed", clientTxnId));
 
     expect(res.status).toBe(200);
     expect((await readPayment(paymentId)).status).toBe("FAILED");
@@ -299,20 +337,13 @@ describeDb("payment settlement", () => {
   it("does not un-confirm an order when a late failure arrives after success", async () => {
     const { orderId, paymentId, clientTxnId, amount, item, qty } = await seedAwaitingPayment();
 
-    await postWebhook({
-      event: "payment.success",
-      status: "success",
-      client_txn_id: clientTxnId,
-      amount: Number(amount),
-      idempotency_key: "idem-first-success",
-    });
-    // A contradicting delivery, correctly signed, arriving afterwards.
-    await postWebhook({
-      event: "payment.failed",
-      status: "failed",
-      client_txn_id: clientTxnId,
-      idempotency_key: "idem-late-failure",
-    });
+    gatewayTruth = { status: "success", amount, utr: "403993715517" };
+    await postWebhook(webhookBody("success", clientTxnId));
+
+    // A contradicting delivery arriving afterwards, which the gateway now
+    // agrees with. Even so it must not un-confirm a cooking order.
+    gatewayTruth = { status: "failed", amount, utr: null };
+    await postWebhook(webhookBody("failed", clientTxnId));
 
     // Terminal states are final: the kitchen may already be cooking this.
     const payment = await readPayment(paymentId);
@@ -327,16 +358,10 @@ describeDb("payment settlement", () => {
   it("rejects a forged signature and changes nothing", async () => {
     const { orderId, paymentId, clientTxnId, amount, item, qty } = await seedAwaitingPayment();
 
-    const res = await postWebhook(
-      {
-        event: "payment.success",
-        status: "success",
-        client_txn_id: clientTxnId,
-        amount: Number(amount),
-        idempotency_key: "idem-forged",
-      },
-      { secret: "whsec_attacker_guessed_this" },
-    );
+    gatewayTruth = { status: "success", amount, utr: "403993715517" };
+    const res = await postWebhook(webhookBody("success", clientTxnId), {
+      secret: "whsec_attacker_guessed_this",
+    });
 
     expect(res.status).toBe(401);
 
@@ -349,23 +374,57 @@ describeDb("payment settlement", () => {
     expect(await readReserved(item.id)).toBe(qty);
   });
 
-  it("rejects a replayed-but-stale timestamp even with a valid signature", async () => {
-    const { orderId, clientTxnId, amount } = await seedAwaitingPayment();
+  /**
+   * The defence that replaces signature verification.
+   *
+   * An attacker who learns the shared secret — from a log, a proxy, anywhere a
+   * webhook body has ever been written down — can send a perfectly
+   * authenticated "success". This is that attack, and it fails: the Status API
+   * still says pending, so nothing is released.
+   */
+  it("releases nothing when the gateway disagrees with a well-formed webhook", async () => {
+    const { orderId, paymentId, clientTxnId, item, qty } = await seedAwaitingPayment();
 
-    const stale = String(Math.floor(Date.now() / 1000) - 10 * 60);
-    const res = await postWebhook(
-      {
-        event: "payment.success",
-        status: "success",
-        client_txn_id: clientTxnId,
-        amount: Number(amount),
-        idempotency_key: "idem-stale",
-      },
-      { timestamp: stale },
-    );
+    // SafeUPI itself says the money never arrived.
+    gatewayTruth = { status: "pending", amount: "30.00" };
+    const res = await postWebhook(webhookBody("success", clientTxnId));
 
-    expect(res.status).toBe(401);
+    // 200, because the delivery was well-formed; but nothing moved.
+    expect(res.status).toBe(200);
+
+    const order = await readOrder(orderId);
+    expect(order.awaitingPayment).toBe(true);
+    expect(order.status).toBe("PENDING");
+    expect((await readPayment(paymentId)).status).toBe("PENDING");
+    expect(await readReserved(item.id)).toBe(qty);
+  });
+
+  it("releases nothing when the gateway cannot be reached", async () => {
+    const { orderId, paymentId, clientTxnId, item, qty } = await seedAwaitingPayment();
+
+    // Unverifiable is treated as untrue: the poll and the expiry sweep both
+    // still run, so a genuine payment is picked up moments later anyway.
+    gatewayUnreachable = true;
+    const res = await postWebhook(webhookBody("success", clientTxnId));
+    gatewayUnreachable = false;
+
+    expect(res.status).toBe(200);
     expect((await readOrder(orderId)).awaitingPayment).toBe(true);
+    expect((await readPayment(paymentId)).status).toBe("PENDING");
+    expect(await readReserved(item.id)).toBe(qty);
+  });
+
+  it("records that a settlement was confirmed against the Status API", async () => {
+    const { paymentId, clientTxnId, amount } = await seedAwaitingPayment();
+
+    gatewayTruth = { status: "success", amount, utr: "403993715517" };
+    await postWebhook(webhookBody("success", clientTxnId));
+
+    const { rows } = await query<{ verifiedViaStatusApi: boolean }>(
+      pool,
+      sql`SELECT "verifiedViaStatusApi" FROM "Payment" WHERE "id" = ${paymentId}::text`,
+    );
+    expect(rows[0].verifiedViaStatusApi).toBe(true);
   });
 
   /**
@@ -452,13 +511,8 @@ describeDb("payment settlement", () => {
   });
 
   it("ignores a webhook naming a payment we have no record of", async () => {
-    const res = await postWebhook({
-      event: "payment.success",
-      status: "success",
-      client_txn_id: "KLH-never-issued-this",
-      amount: 99,
-      idempotency_key: "idem-unknown",
-    });
+    gatewayTruth = { status: "success", amount: "99.00" };
+    const res = await postWebhook(webhookBody("success", "KLH-never-issued-this"));
 
     // 200, because the delivery was genuine and there is nothing to retry.
     expect(res.status).toBe(200);

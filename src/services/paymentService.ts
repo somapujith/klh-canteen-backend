@@ -8,7 +8,7 @@ import type { Bindings } from "../types.js";
 type RawRunner = Pick<Pool | PoolClient, "query">;
 
 /**
- * UPI payments through VyaparGateway.
+ * UPI payments through SafeUPI.
  *
  * Callers: routes/payments.ts (checkout, status poll, webhook).
  * Shape: one Payment covers a whole cart, which createOrder may have split
@@ -16,18 +16,35 @@ type RawRunner = Pick<Pool | PoolClient, "query">;
  * out to every order carrying this paymentId.
  *
  * Nothing here trusts the client for money. The amount charged is recomputed
- * from the orders we wrote; the amount confirmed is checked against it again
- * when the webhook lands.
+ * from the orders we wrote, and the amount SafeUPI reports is checked against
+ * it again before a single order is released.
+ *
+ * THE TRUST MODEL IS WEAKER THAN IT LOOKS, and the code is shaped around that.
+ * SafeUPI's webhook is not signed: it echoes a shared secret back in the
+ * request body. Anything that ever sees one delivery — a log, a proxy, a
+ * misconfigured egress — learns the secret and can then forge a "success".
+ * So a webhook is treated as a HINT THAT SOMETHING HAPPENED, never as proof
+ * that it did: every settlement is independently confirmed by calling
+ * SafeUPI's own Status API before any food is released. Forging a delivery
+ * therefore is not enough; an attacker would also have to fool SafeUPI.
  */
 
-const GATEWAY_BASE_URL = "https://vyapargateway.com";
+const GATEWAY_BASE_URL = "https://www.safeupi.com";
 
-/** Gateway's own window is 2 minutes. Ours matches, tracked independently so
- *  an expired payment is closed out even if no webhook ever arrives. */
-export const PAYMENT_WINDOW_MS = 2 * 60 * 1000;
+/**
+ * How long a payment is held open before it is closed out as expired.
+ *
+ * SafeUPI does not document a checkout expiry for the hosted page the way the
+ * previous gateway did, so this is our own bound rather than a mirror of
+ * theirs. Fifteen minutes is chosen to be comfortably longer than a student
+ * fumbling with a UPI PIN, while still returning the food to the counter the
+ * same lunch hour if they wander off.
+ */
+export const PAYMENT_WINDOW_MS = 15 * 60 * 1000;
 
-/** Rupee bounds the gateway documents. Rejected here so a doomed order is
- *  never written, rather than discovered by a 400 from create_order. */
+/** Rupee bounds. SafeUPI documents only "a positive number", so these are our
+ *  own sanity rails: a zero-rupee order is a bug, and a five-figure canteen
+ *  bill is far more likely to be one than a real lunch. */
 const MIN_AMOUNT = 1;
 const MAX_AMOUNT = 100_000;
 
@@ -47,6 +64,18 @@ export interface PaymentRow {
   payerName: string | null;
   qrCode: string | null;
   upiString: string | null;
+  /** SafeUPI's hosted checkout page — where the student is sent to pay. */
+  paymentUrl: string | null;
+  /** The connected merchant SafeUPI routed this payment to, after fallback. */
+  linkedMerchantId: string | null;
+  /** sha256 of that merchant's UPI ID, as SafeUPI returns it. */
+  merchantUpiHash: string | null;
+  /**
+   * Whether this payment's outcome was confirmed against SafeUPI's Status API
+   * rather than believed from the webhook alone. Recorded because the webhook
+   * is unsigned, so "we checked" is a fact worth being able to audit.
+   */
+  verifiedViaStatusApi: boolean;
   expiresAt: Date | null;
   paidAt: Date | null;
   failureReason: string | null;
@@ -61,10 +90,14 @@ export interface PaymentRow {
 // ---------------------------------------------------------------------------
 
 export interface PaymentConfig {
-  apiKey: string;
+  /** SafeUPI's `secret` — the API key sent in every request body. */
+  apiSecret: string;
+  /** The value SafeUPI echoes in a webhook body. Not a signing key. */
   webhookSecret: string;
-  callbackUrl: string;
-  redirectUrl?: string;
+  /** Where SafeUPI returns the student's browser after the hosted page. */
+  redirectUrl: string;
+  /** Optional merchant to route to; SafeUPI picks a default when absent. */
+  merchantId?: string;
 }
 
 /**
@@ -76,47 +109,57 @@ export interface PaymentConfig {
  */
 export function paymentsEnabled(bindings: Bindings): boolean {
   if (String(bindings.PAYMENTS_ENABLED ?? "").toLowerCase() !== "true") return false;
-  return Boolean(bindings.VYAPAR_API_KEY && bindings.VYAPAR_WEBHOOK_SECRET);
+  return Boolean(bindings.SAFEUPI_API_SECRET && bindings.SAFEUPI_REDIRECT_URL);
 }
 
 /**
  * Config or a hard failure. Called only behind paymentsEnabled(), so a throw
  * here means the flag was flipped on without the secrets — worth a 503 that
  * names the cause rather than a confusing gateway error later.
+ *
+ * SAFEUPI_WEBHOOK_SECRET is required too, and deliberately so. It is the only
+ * thing standing between a stranger's POST and a confirmed order, and an empty
+ * expected secret would compare equal to an empty supplied one — turning the
+ * check into a no-op precisely when it matters most.
  */
 export function getPaymentConfig(bindings: Bindings): PaymentConfig {
-  const apiKey = bindings.VYAPAR_API_KEY;
-  const webhookSecret = bindings.VYAPAR_WEBHOOK_SECRET;
-  const callbackUrl = bindings.VYAPAR_CALLBACK_URL;
+  const apiSecret = bindings.SAFEUPI_API_SECRET;
+  const webhookSecret = bindings.SAFEUPI_WEBHOOK_SECRET;
+  const redirectUrl = bindings.SAFEUPI_REDIRECT_URL;
 
-  if (!apiKey || !webhookSecret || !callbackUrl) {
+  if (!apiSecret || !webhookSecret || !redirectUrl) {
     throw new ApiError(
       503,
       "PAYMENTS_UNCONFIGURED",
-      "Payments are not configured. Set VYAPAR_API_KEY, VYAPAR_WEBHOOK_SECRET and VYAPAR_CALLBACK_URL.",
+      "Payments are not configured. Set SAFEUPI_API_SECRET, SAFEUPI_WEBHOOK_SECRET and SAFEUPI_REDIRECT_URL.",
     );
   }
   return {
-    apiKey,
+    apiSecret,
     webhookSecret,
-    callbackUrl,
-    redirectUrl: bindings.VYAPAR_REDIRECT_URL,
+    redirectUrl,
+    merchantId: bindings.SAFEUPI_MERCHANT_ID,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Webhook signature verification
+// Webhook authentication
 // ---------------------------------------------------------------------------
 
 /**
- * Constant-time compare of two hex strings.
+ * Constant-time compare of two strings.
  *
  * Node's crypto.timingSafeEqual is not available on workerd, so the compare is
  * written out: fixed-length accumulate, no early return. The length check is
  * folded into the result rather than short-circuiting, so a wrong-length
- * signature costs the same as a wrong-value one.
+ * secret costs the same as a wrong-value one.
+ *
+ * This matters more here than it did under the previous gateway. SafeUPI's
+ * webhook carries the shared secret itself rather than a signature over the
+ * payload, so a naive `===` would leak that secret's prefix through response
+ * timing — one character at a time, to anyone who can POST repeatedly.
  */
-function timingSafeEqualHex(a: string, b: string): boolean {
+function timingSafeEqual(a: string, b: string): boolean {
   const equalLength = a.length === b.length;
   // Compare against itself on mismatch so loop cost never depends on b.
   const rhs = equalLength ? b : a;
@@ -127,82 +170,38 @@ function timingSafeEqualHex(a: string, b: string): boolean {
   return diff === 0 && equalLength;
 }
 
-function toHex(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let hex = "";
-  for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
-  return hex;
-}
-
-/**
- * HMAC-SHA256 over `{timestamp}.{rawBody}`, per the gateway's documented
- * scheme.
- *
- * `rawBody` must be the exact bytes received. The dashboard's Python and Node
- * samples re-serialize the parsed JSON before signing, which yields a
- * different string than the one that was signed — key order, separators,
- * unicode escaping and float formatting all differ between serializers. The
- * API documentation says to sign the raw body, and that is what happens here.
- */
-export async function computeWebhookSignature(
-  secret: string,
-  timestamp: string,
-  rawBody: string,
-): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await globalThis.crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await globalThis.crypto.subtle.sign(
-    "HMAC",
-    key,
-    encoder.encode(`${timestamp}.${rawBody}`),
-  );
-  return toHex(signature);
-}
-
-/** How far out of step a webhook timestamp may be before it is refused. Bounds
- *  the window in which a captured delivery can still be replayed. */
-const TIMESTAMP_TOLERANCE_SECONDS = 5 * 60;
-
 export interface WebhookVerification {
   ok: boolean;
   reason?: string;
 }
 
 /**
- * Verifies a webhook's signature and freshness.
+ * Authenticates a SafeUPI webhook.
  *
- * Freshness is checked as well as the signature because a signature stays
- * valid forever: with no timestamp bound, anyone who ever captured one genuine
- * delivery could replay it indefinitely. Both directions are bounded — a
- * far-future timestamp is as suspect as an old one.
+ * SafeUPI does not sign its webhooks. It puts a shared secret in the request
+ * body and expects the receiver to compare it, so this is a bearer check
+ * rather than a proof of integrity: it establishes that the sender knows the
+ * secret, and NOTHING about whether the payload was tampered with in flight or
+ * even relates to a real payment.
+ *
+ * That is why this function is not the last word. applyWebhook re-checks the
+ * outcome against SafeUPI's Status API before releasing anything, so passing
+ * this check buys a caller the right to be listened to, not the right to be
+ * believed. See the note at the top of this module.
+ *
+ * An absent configured secret is refused rather than treated as "no check
+ * required" — otherwise a misconfigured deploy would accept every POST.
  */
-export async function verifyWebhook(
-  secret: string,
-  headers: { signature?: string; timestamp?: string },
-  rawBody: string,
-  now: Date = new Date(),
-): Promise<WebhookVerification> {
-  const { signature, timestamp } = headers;
-  if (!signature) return { ok: false, reason: "missing signature header" };
-  if (!timestamp) return { ok: false, reason: "missing timestamp header" };
-
-  const ts = Number(timestamp);
-  if (!Number.isFinite(ts)) return { ok: false, reason: "malformed timestamp header" };
-
-  const skew = Math.abs(Math.floor(now.getTime() / 1000) - ts);
-  if (skew > TIMESTAMP_TOLERANCE_SECONDS) {
-    return { ok: false, reason: `timestamp outside tolerance (${skew}s)` };
+export function verifyWebhook(
+  configuredSecret: string,
+  suppliedSecret: unknown,
+): WebhookVerification {
+  if (!configuredSecret) return { ok: false, reason: "no webhook secret configured" };
+  if (typeof suppliedSecret !== "string" || suppliedSecret.length === 0) {
+    return { ok: false, reason: "missing secret in payload" };
   }
-
-  const expected = await computeWebhookSignature(secret, timestamp, rawBody);
-  if (!timingSafeEqualHex(signature.trim().toLowerCase(), expected)) {
-    return { ok: false, reason: "signature mismatch" };
+  if (!timingSafeEqual(suppliedSecret, configuredSecret)) {
+    return { ok: false, reason: "secret mismatch" };
   }
   return { ok: true };
 }
@@ -211,57 +210,68 @@ export async function verifyWebhook(
 // Gateway client
 // ---------------------------------------------------------------------------
 
+/**
+ * SafeUPI's response envelope: `{ success, message, data }`, with `key` added
+ * on some errors as a machine-readable reason (e.g. "duplicate_order_id").
+ */
 interface GatewayEnvelope<T> {
-  status: boolean;
-  msg: string;
-  data: T;
-  /**
-   * The gateway's OTHER error shape.
-   *
-   * Success and business-rule failures come back in the documented
-   * `{status, msg, data}` envelope, but errors raised before that layer —
-   * an unrecognised key, an IP that is not whitelisted, no merchant connected
-   * — arrive as a bare `{"detail": "..."}` instead. Reading only `msg` there
-   * loses the one sentence that says what is actually wrong, which is how
-   * "No provider is enabled for this tenant" reached the logs as `undefined`.
-   */
-  detail?: string;
+  success: boolean;
+  message?: string;
+  key?: string;
+  data?: T;
 }
 
-/** Whichever field this response carries its reason in. */
+/** The human-readable reason, whichever field carries it. */
 function gatewayMessage<T>(parsed: GatewayEnvelope<T>): string | undefined {
-  return parsed.msg || parsed.detail || undefined;
+  return parsed.message || parsed.key || undefined;
 }
 
+/** POST /api/order/create */
 interface CreateOrderData {
-  order_id: string;
-  client_txn_id: string;
-  amount: number;
-  currency: string;
-  status: string;
-  expires_at: string;
-  qr_code: string;
-  upi_string: string;
-  upi_intent?: Record<string, string>;
+  id: number;
+  system_order_id: string;
+  merchant_order_id: string;
+  linked_merchant_id?: number | string | null;
   merchant_upi_id?: string;
-  merchant_name?: string;
+  merchant_type?: string;
+  payment?: {
+    url?: string;
+    checkout?: { token?: string; sdk_url?: string; expires_at?: string };
+    paylinks?: Record<string, Record<string, { icon?: string; link?: string }>>;
+    /** Only returned for selected businesses, so never relied on. */
+    qr_code?: string;
+  };
 }
 
+/** POST /api/order/status */
 interface CheckStatusData {
-  order_id: string;
-  client_txn_id: string;
-  amount: number;
-  currency: string;
+  id: number;
+  system_order_id: string;
+  merchant_order_id: string;
   status: string;
-  upi_txn_id?: string;
-  expires_at?: string;
+  amount: string | number;
+  merchant_info?: { name?: string; upi_id?: string };
+  created_at?: number;
+  payment?: {
+    transaction_at?: number | string | null;
+    utr?: string | null;
+    customer_vpa?: string | null;
+  };
 }
 
-/** Gateway calls are capped well under the 2-minute payment window: a hung
- *  connection must not hold a request open until the order it is paying for
- *  has already expired. */
+/** Capped well under the payment window: a hung connection must not hold a
+ *  request open until the order it is paying for has already expired. */
 const GATEWAY_TIMEOUT_MS = 15_000;
 
+/**
+ * One SafeUPI call.
+ *
+ * The API key rides in the JSON body as `secret`, which is SafeUPI's documented
+ * scheme and not a choice available to us — there is no header form. It is a
+ * meaningfully worse place for a credential than a header (bodies are what get
+ * logged and echoed back in error reports), so nothing in this module ever logs
+ * a request body, and the error paths below log only the response.
+ */
 async function callGateway<T>(
   config: PaymentConfig,
   path: string,
@@ -271,12 +281,8 @@ async function callGateway<T>(
   try {
     response = await fetch(`${GATEWAY_BASE_URL}${path}`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        // Header auth, so the key never rides in a body that might be logged.
-        "X-API-Key": config.apiKey,
-      },
-      body: JSON.stringify(body),
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ secret: config.apiSecret, ...body }),
       signal: AbortSignal.timeout(GATEWAY_TIMEOUT_MS),
     });
   } catch (err) {
@@ -299,22 +305,20 @@ async function callGateway<T>(
     throw new ApiError(502, "PAYMENT_GATEWAY_ERROR", "The payment gateway returned an unreadable response.");
   }
 
-  if (!response.ok || !parsed.status) {
-    // The gateway's own message describes the request we made, not its
-    // internals, so it is safe to surface. The key never appears in it.
+  // SafeUPI signals failure with `success: false` and may still answer HTTP
+  // 200, so the envelope is authoritative rather than the status code.
+  if (!response.ok || !parsed.success) {
     const reason = gatewayMessage(parsed);
     console.error("[payments] gateway rejected request", path, response.status, reason ?? "(no reason given)");
 
-    // 412 means the account itself is not ready to take payments — no merchant
-    // connected, in practice. That is a configuration problem an operator has
-    // to fix in the VyaparGateway dashboard, and it will not resolve on a
-    // retry, so it is worth its own code rather than being folded into the
-    // generic upstream failure.
-    if (response.status === 412) {
+    // A reused merchant_order_id is our bug, not the student's, and retrying
+    // the same id will never succeed — worth its own code so it is greppable
+    // rather than buried in the generic upstream failure.
+    if (parsed.key === "duplicate_order_id") {
       throw new ApiError(
-        503,
-        "PAYMENT_PROVIDER_NOT_CONFIGURED",
-        reason ?? "Online payment is not available: no payment provider is connected.",
+        500,
+        "PAYMENT_DUPLICATE_ORDER_ID",
+        "Could not start the payment. Please try again.",
       );
     }
 
@@ -373,11 +377,20 @@ export interface InitiatedPayment {
   currency: string;
   status: PaymentStatus;
   expiresAt: Date;
-  qrCode: string;
-  upiString: string;
-  upiIntent: Record<string, string>;
-  merchantUpiId: string | null;
-  merchantName: string | null;
+  /**
+   * SafeUPI's hosted checkout page. The client sends the student here; this is
+   * the whole of the payment UI under the hosted-page flow.
+   */
+  paymentUrl: string;
+  /**
+   * Returned only for selected businesses, so it is very often absent and the
+   * client must not depend on it. Passed through when present purely so a
+   * desktop user can be shown a code instead of being sent to a phone-shaped
+   * page, but the hosted page renders its own QR regardless.
+   */
+  qrCode: string | null;
+  linkedMerchantId: string | null;
+  merchantUpiHash: string | null;
 }
 
 /**
@@ -454,23 +467,27 @@ export async function initiatePayment(
 
   let data: CreateOrderData;
   try {
-    const envelope = await callGateway<CreateOrderData>(config, "/api/v1/create_order", {
-      client_txn_id: clientTxnId,
-      amount,
-      p_info: input.productInfo ?? "Canteen order",
+    const envelope = await callGateway<CreateOrderData>(config, "/api/order/create", {
+      merchant_order_id: clientTxnId,
+      amount: amount.toFixed(2),
       customer_name: owner.customerName || "Customer",
-      ...(owner.customerMobile ? { customer_mobile: owner.customerMobile } : {}),
-      ...(owner.customerEmail ? { customer_email: owner.customerEmail } : {}),
-      callback_url: config.callbackUrl,
-      ...(config.redirectUrl ? { redirect_url: config.redirectUrl } : {}),
-      // udf1 carries our payment id back on the webhook, which lets a delivery
-      // be matched even if every other reference is somehow absent. The API
-      // caps udf fields at 25 characters and a UUID is 36, so the dashes go
-      // and the leading 24 hex characters are kept — unique enough to
-      // disambiguate, and only ever consulted after clientTxnId and
-      // gatewayOrderId have both failed to match.
-      udf1: paymentId.replace(/-/g, "").slice(0, 24),
+      // Required by SafeUPI even when we do not hold one. A guest ordering at
+      // the counter has neither, so a per-payment placeholder on our own domain
+      // stands in: it is syntactically valid, unmistakably not a real inbox,
+      // and unique so it can never collide with a real student's address.
+      customer_email: owner.customerEmail || `${clientTxnId.toLowerCase()}@guest.klh-canteen.invalid`,
+      customer_phone: owner.customerMobile || "0000000000",
+      // Where SafeUPI returns the browser once the hosted page is done. The
+      // payment id rides along so the landing page knows which payment to
+      // confirm — it is an opaque lookup key, not a credential: the status
+      // endpoint it feeds is owner-scoped and hands nothing to a stranger.
+      redirect_url: `${config.redirectUrl}${config.redirectUrl.includes("?") ? "&" : "?"}payment=${paymentId}`,
+      ...(config.merchantId ? { merchant_id: config.merchantId } : {}),
+      metadata: { payment_id: paymentId, orders: orderIds.join(",") },
     });
+    if (!envelope.data) {
+      throw new ApiError(502, "PAYMENT_GATEWAY_ERROR", "The payment gateway returned no order.");
+    }
     data = envelope.data;
   } catch (err) {
     // The gateway never opened. Close the row out so the sweep is not left
@@ -480,7 +497,7 @@ export async function initiatePayment(
       sql`
         UPDATE "Payment"
            SET "status" = 'FAILED',
-               "failureReason" = 'gateway create_order failed',
+               "failureReason" = 'gateway order/create failed',
                "updatedAt" = NOW()
          WHERE "id" = ${paymentId}::text
       `,
@@ -488,20 +505,39 @@ export async function initiatePayment(
     throw err;
   }
 
-  // The gateway's expiry wins if it sent one — it is the clock that actually
-  // governs whether a scan will still be accepted.
-  const gatewayExpiry = data.expires_at ? new Date(data.expires_at) : null;
-  const effectiveExpiry =
-    gatewayExpiry && !Number.isNaN(gatewayExpiry.getTime()) ? gatewayExpiry : expiresAt;
+  const paymentUrl = data.payment?.url;
+  if (!paymentUrl) {
+    // Without somewhere to send the student there is no payment, so this is a
+    // hard failure rather than a half-open row nobody can act on.
+    await query(
+      pool,
+      sql`
+        UPDATE "Payment"
+           SET "status" = 'FAILED',
+               "failureReason" = 'gateway returned no payment url',
+               "updatedAt" = NOW()
+         WHERE "id" = ${paymentId}::text
+      `,
+    ).catch(() => {});
+    throw new ApiError(502, "PAYMENT_GATEWAY_ERROR", "The payment gateway returned no payment link.");
+  }
 
+  const linkedMerchantId =
+    data.linked_merchant_id === null || data.linked_merchant_id === undefined
+      ? null
+      : String(data.linked_merchant_id);
+
+  // SafeUPI documents no expiry for the hosted page, so our own window stands
+  // as written at insert time — there is no gateway clock to defer to here.
   await query(
     pool,
     sql`
       UPDATE "Payment"
-         SET "gatewayOrderId" = ${data.order_id}::text,
-             "qrCode" = ${data.qr_code ?? null}::text,
-             "upiString" = ${data.upi_string ?? null}::text,
-             "expiresAt" = ${effectiveExpiry.toISOString()}::timestamp,
+         SET "gatewayOrderId" = ${data.system_order_id}::text,
+             "paymentUrl" = ${paymentUrl}::text,
+             "qrCode" = ${data.payment?.qr_code ?? null}::text,
+             "linkedMerchantId" = ${linkedMerchantId}::text,
+             "merchantUpiHash" = ${data.merchant_upi_id ?? null}::text,
              "updatedAt" = NOW()
        WHERE "id" = ${paymentId}::text
     `,
@@ -531,16 +567,15 @@ export async function initiatePayment(
   return {
     paymentId,
     clientTxnId,
-    gatewayOrderId: data.order_id,
+    gatewayOrderId: data.system_order_id,
     amount: amount.toFixed(2),
-    currency: data.currency || "INR",
+    currency: "INR",
     status: "PENDING",
-    expiresAt: effectiveExpiry,
-    qrCode: data.qr_code,
-    upiString: data.upi_string,
-    upiIntent: data.upi_intent ?? {},
-    merchantUpiId: data.merchant_upi_id ?? null,
-    merchantName: data.merchant_name ?? null,
+    expiresAt,
+    paymentUrl,
+    qrCode: data.payment?.qr_code ?? null,
+    linkedMerchantId,
+    merchantUpiHash: data.merchant_upi_id ?? null,
   };
 }
 
@@ -552,18 +587,26 @@ export async function initiatePayment(
  *  (static and dynamic) are covered — they carry different reference fields,
  *  so every identifier is optional and matching tries them in turn. */
 export interface WebhookPayload {
+  /** created | scanning | success | failed | cancelled */
   event?: string;
-  status?: string;
-  order_id?: string;
-  client_txn_id?: string;
-  amount?: number | string;
-  currency?: string;
-  upi_txn_id?: string;
-  payer_vpa?: string;
-  payer_name?: string;
-  idempotency_key?: string;
-  udf1?: string;
-  timestamp?: number | string;
+  data?: {
+    id?: number;
+    status?: string;
+    amount?: number | string;
+    merchant_order_id?: string;
+    system_order_id?: string;
+    customer_name?: string;
+    customer_email?: string;
+    customer_phone?: string;
+    metadata?: Record<string, unknown> | null;
+    payment?: {
+      transaction_at?: string | number | null;
+      utr?: string | null;
+      customer_vpa?: string | null;
+    };
+  };
+  /** The shared secret SafeUPI echoes back. Checked, never stored or logged. */
+  secret?: string;
 }
 
 /** Gateway vocabulary to ours. 'processing' folds into PENDING because it
@@ -574,8 +617,18 @@ function mapGatewayStatus(raw: string | undefined): PaymentStatus | null {
       return "SUCCESS";
     case "failed":
       return "FAILED";
+    case "cancelled":
+    case "canceled":
+      // The student walked away. Terminal for us in exactly the way a failure
+      // is: the order is released and the food goes back on sale.
+      return "FAILED";
     case "expired":
       return "EXPIRED";
+    // "created" and "scanning" are progress notifications, not decisions —
+    // the money has neither arrived nor been refused — so both fold into
+    // PENDING and change nothing but the row's updatedAt.
+    case "created":
+    case "scanning":
     case "pending":
     case "processing":
       return "PENDING";
@@ -609,38 +662,77 @@ async function findPaymentForWebhook(
   db: RawRunner,
   payload: WebhookPayload,
 ): Promise<PaymentRow | null> {
-  if (payload.client_txn_id) {
+  const data = payload.data ?? {};
+
+  if (data.merchant_order_id) {
     const { rows } = await query<PaymentRow>(
       db,
-      sql`SELECT * FROM "Payment" WHERE "clientTxnId" = ${payload.client_txn_id}::text LIMIT 1`,
+      sql`SELECT * FROM "Payment" WHERE "clientTxnId" = ${data.merchant_order_id}::text LIMIT 1`,
     );
     if (rows[0]) return rows[0];
   }
-  if (payload.order_id) {
+  if (data.system_order_id) {
     const { rows } = await query<PaymentRow>(
       db,
-      sql`SELECT * FROM "Payment" WHERE "gatewayOrderId" = ${payload.order_id}::text LIMIT 1`,
+      sql`SELECT * FROM "Payment" WHERE "gatewayOrderId" = ${data.system_order_id}::text LIMIT 1`,
     );
     if (rows[0]) return rows[0];
   }
-  if (payload.udf1) {
-    // udf1 is the payment UUID with dashes stripped, truncated to 24 chars.
-    // Matched by prefix against the same transformation of the stored id.
+
+  // Last resort: our own payment id, sent as metadata on create. Only reached
+  // when both references above are absent or unrecognised.
+  const metaId = data.metadata && typeof data.metadata === "object"
+    ? (data.metadata as Record<string, unknown>).payment_id
+    : undefined;
+  if (typeof metaId === "string" && metaId.length > 0) {
     const { rows } = await query<PaymentRow>(
       db,
-      sql`
-        SELECT * FROM "Payment"
-         WHERE LEFT(REPLACE("id", '-', ''), 24) = ${payload.udf1}::text
-         LIMIT 1
-      `,
+      sql`SELECT * FROM "Payment" WHERE "id" = ${metaId}::text LIMIT 1`,
     );
     if (rows[0]) return rows[0];
   }
   return null;
 }
 
+/** What SafeUPI itself says about a payment, asked directly. */
+export interface GatewayTruth {
+  status: PaymentStatus | null;
+  amount: number | null;
+  utr: string | null;
+  customerVpa: string | null;
+  systemOrderId: string | null;
+}
+
 /**
- * Applies a verified webhook.
+ * Asks SafeUPI what actually happened to a payment.
+ *
+ * This is the check that makes an unsigned webhook safe to act on. A forged
+ * delivery can claim anything; it cannot make this endpoint agree. Every
+ * settlement that releases food goes through here first — see the trust-model
+ * note at the top of this module.
+ */
+export async function fetchGatewayStatus(
+  config: PaymentConfig,
+  clientTxnId: string,
+): Promise<GatewayTruth> {
+  const envelope = await callGateway<CheckStatusData>(config, "/api/order/status", {
+    merchant_order_id: clientTxnId,
+  });
+  const data = envelope.data;
+  if (!data) return { status: null, amount: null, utr: null, customerVpa: null, systemOrderId: null };
+
+  const amount = Number(data.amount);
+  return {
+    status: mapGatewayStatus(data.status),
+    amount: Number.isFinite(amount) ? amount : null,
+    utr: data.payment?.utr ?? null,
+    customerVpa: data.payment?.customer_vpa ?? null,
+    systemOrderId: data.system_order_id ?? null,
+  };
+}
+
+/**
+ * Applies a webhook, after independently confirming it with SafeUPI.
  *
  * Runs in one transaction and takes `FOR UPDATE` on the payment row, because
  * the gateway may deliver the same event twice concurrently: without the lock
@@ -648,22 +740,107 @@ async function findPaymentForWebhook(
  * both would confirm the orders. The row lock serialises them, and the second
  * one then sees a terminal status and does nothing.
  *
- * The signature must already have been checked by the caller — this function
- * assumes the payload is genuine and acts on it.
+ * `config` is what separates this from the previous gateway's version. Passing
+ * it turns on the Status API confirmation, which is REQUIRED for any outcome
+ * that releases food: SafeUPI's webhook is unsigned, so the payload alone is
+ * only a claim. Omitting it (the reconciliation path, which already has the
+ * gateway's answer in hand) skips the second call rather than making it twice.
  */
 export async function applyWebhook(
   pool: Pool,
   payload: WebhookPayload,
+  options: { config?: PaymentConfig; alreadyVerified?: boolean } = {},
 ): Promise<SettlementResult> {
-  const incoming = mapGatewayStatus(payload.status ?? payload.event?.split(".")[1]);
-  if (!incoming) {
+  const claimed = mapGatewayStatus(payload.data?.status ?? payload.event);
+  if (!claimed) {
     return {
       changed: false,
       payment: null,
       status: null,
       confirmedOrderIds: [],
       releasedOrderIds: [],
-      reason: `unrecognised status "${payload.status ?? payload.event ?? ""}"`,
+      reason: `unrecognised status "${payload.data?.status ?? payload.event ?? ""}"`,
+    };
+  }
+
+  /**
+   * Ask SafeUPI directly, BEFORE opening the transaction.
+   *
+   * Before, because this is a network call and holding a row lock across one
+   * would pin the payment row for as long as the gateway takes to answer —
+   * exactly the mistake the two-statement order path was written to avoid.
+   *
+   * The gateway's answer replaces the payload's claim outright. A webhook that
+   * says "success" against a payment SafeUPI still calls pending settles
+   * nothing, which is precisely the forged-delivery case this exists to stop.
+   */
+  let incoming = claimed;
+  let verified = false;
+  let truth: GatewayTruth | null = null;
+
+  if (options.alreadyVerified) {
+    verified = true;
+  } else if (options.config) {
+    const found = await findPaymentForWebhook(pool, payload);
+    if (!found) {
+      return {
+        changed: false,
+        payment: null,
+        status: null,
+        confirmedOrderIds: [],
+        releasedOrderIds: [],
+        reason: "no matching payment",
+      };
+    }
+    try {
+      truth = await fetchGatewayStatus(options.config, found.clientTxnId);
+      verified = true;
+    } catch (err) {
+      // Could not reach SafeUPI. Deliberately settles NOTHING rather than
+      // falling back to the payload: an unverifiable claim is exactly what an
+      // attacker would send, and the poll and expiry sweep both still run, so
+      // a genuine payment is picked up moments later anyway.
+      console.error("[payments] could not verify webhook with the gateway", err);
+      return {
+        changed: false,
+        payment: found,
+        status: found.status,
+        confirmedOrderIds: [],
+        releasedOrderIds: [],
+        reason: "gateway verification failed",
+      };
+    }
+
+    if (!truth.status) {
+      return {
+        changed: false,
+        payment: found,
+        status: found.status,
+        confirmedOrderIds: [],
+        releasedOrderIds: [],
+        reason: "gateway reported no usable status",
+      };
+    }
+
+    if (truth.status !== claimed) {
+      // Worth shouting about: either SafeUPI changed its mind between sending
+      // the webhook and answering us, or the delivery did not come from them.
+      console.warn(
+        "[payments] webhook disagrees with the gateway",
+        { claimed, actual: truth.status, paymentId: found.id },
+      );
+    }
+    // The gateway wins, always.
+    incoming = truth.status;
+  } else {
+    // No config and not pre-verified: refuse rather than trusting the payload.
+    return {
+      changed: false,
+      payment: null,
+      status: null,
+      confirmedOrderIds: [],
+      releasedOrderIds: [],
+      reason: "no gateway config to verify against",
     };
   }
 
@@ -705,9 +882,17 @@ export async function applyWebhook(
       };
     }
 
-    // Replay guard. The gateway retries until it is 200-ed, so the same key
-    // arriving twice is expected traffic, not an attack — answered as a no-op.
-    if (payload.idempotency_key && payment.idempotencyKey === payload.idempotency_key) {
+    // Replay guard. SafeUPI sends no idempotency key, so one is derived from
+    // the values that are unique to a settled transaction: the outcome plus
+    // the bank's UTR. A retry of the same delivery therefore produces the same
+    // key and is answered as the no-op it is.
+    const deliveryKey = truth?.utr
+      ? `${incoming}:${truth.utr}`
+      : payload.data?.payment?.utr
+        ? `${incoming}:${payload.data.payment.utr}`
+        : null;
+
+    if (deliveryKey && payment.idempotencyKey === deliveryKey) {
       await client.query("ROLLBACK");
       return {
         changed: false,
@@ -741,15 +926,16 @@ export async function applyWebhook(
     // allowed to release food. Compared in paise to avoid float equality.
     if (incoming === "SUCCESS") {
       const expectedPaise = Math.round(Number(payment.amount) * 100);
-      const paidPaise = Math.round(Number(payload.amount ?? 0) * 100);
+      // The gateway's figure, not the payload's — the payload is a claim.
+      const paidPaise = Math.round(Number(truth?.amount ?? payload.data?.amount ?? 0) * 100);
       if (paidPaise !== expectedPaise) {
         await query(
           client,
           sql`
             UPDATE "Payment"
                SET "status" = 'FAILED',
-                   "failureReason" = ${`amount mismatch: expected ${payment.amount}, received ${payload.amount}`}::text,
-                   "idempotencyKey" = COALESCE(${payload.idempotency_key ?? null}::text, "idempotencyKey"),
+                   "failureReason" = ${`amount mismatch: expected ${payment.amount}, gateway reported ${truth?.amount ?? payload.data?.amount}`}::text,
+                   "idempotencyKey" = COALESCE(${deliveryKey}::text, "idempotencyKey"),
                    "webhookCount" = "webhookCount" + 1,
                    "updatedAt" = NOW()
              WHERE "id" = ${payment.id}::text
@@ -760,7 +946,7 @@ export async function applyWebhook(
         console.error("[payments] amount mismatch, payment refused", {
           paymentId: payment.id,
           expected: payment.amount,
-          received: payload.amount,
+          received: truth?.amount ?? payload.data?.amount,
         });
         return {
           changed: true,
@@ -778,16 +964,18 @@ export async function applyWebhook(
       sql`
         UPDATE "Payment"
            SET "status" = ${incoming}::text,
-               "upiTxnId" = COALESCE(${payload.upi_txn_id ?? null}::text, "upiTxnId"),
-               "payerVpa" = COALESCE(${payload.payer_vpa ?? null}::text, "payerVpa"),
-               "payerName" = COALESCE(${payload.payer_name ?? null}::text, "payerName"),
+               "upiTxnId" = COALESCE(${truth?.utr ?? payload.data?.payment?.utr ?? null}::text, "upiTxnId"),
+               "payerVpa" = COALESCE(${truth?.customerVpa ?? payload.data?.payment?.customer_vpa ?? null}::text, "payerVpa"),
+               "payerName" = COALESCE(${payload.data?.customer_name ?? null}::text, "payerName"),
+               "gatewayOrderId" = COALESCE("gatewayOrderId", ${truth?.systemOrderId ?? payload.data?.system_order_id ?? null}::text),
+               "verifiedViaStatusApi" = ${verified}::boolean,
                "paidAt" = ${incoming === "SUCCESS" ? sql`NOW()` : sql`"paidAt"`},
                "failureReason" = ${
                  incoming === "FAILED" || incoming === "EXPIRED"
                    ? sql`COALESCE("failureReason", ${`gateway reported ${incoming.toLowerCase()}`}::text)`
                    : sql`"failureReason"`
                },
-               "idempotencyKey" = COALESCE(${payload.idempotency_key ?? null}::text, "idempotencyKey"),
+               "idempotencyKey" = COALESCE(${deliveryKey}::text, "idempotencyKey"),
                "webhookCount" = "webhookCount" + 1,
                "updatedAt" = NOW()
          WHERE "id" = ${payment.id}::text
@@ -1031,28 +1219,29 @@ export async function reconcileWithGateway(
   if (payment.status !== "PENDING") return null;
   const config = getPaymentConfig(bindings);
 
-  const envelope = await callGateway<CheckStatusData>(config, "/api/v1/check_order_status", {
-    ...(payment.gatewayOrderId
-      ? { order_id: payment.gatewayOrderId }
-      : { client_txn_id: payment.clientTxnId }),
-  });
-
-  const data = envelope.data;
-  const mapped = mapGatewayStatus(data.status);
-  if (!mapped || mapped === "PENDING") return null;
+  const truth = await fetchGatewayStatus(config, payment.clientTxnId);
+  if (!truth.status || truth.status === "PENDING") return null;
 
   // Reuses the webhook path so a reconciled settlement takes exactly the same
   // locking, amount check and idempotency route as a delivered one. There is
   // no second, subtly different settlement implementation to keep in step.
-  return applyWebhook(pool, {
-    status: data.status,
-    client_txn_id: payment.clientTxnId,
-    order_id: data.order_id ?? payment.gatewayOrderId ?? undefined,
-    amount: data.amount,
-    upi_txn_id: data.upi_txn_id,
-    // No idempotency key from this endpoint; the FOR UPDATE terminal-status
-    // check is what stops a poll racing a webhook to double-settle.
-  });
+  //
+  // `alreadyVerified` because this answer came straight from the Status API —
+  // it IS the verification, so asking again would be the same call twice.
+  return applyWebhook(
+    pool,
+    {
+      event: truth.status.toLowerCase(),
+      data: {
+        status: truth.status.toLowerCase(),
+        merchant_order_id: payment.clientTxnId,
+        system_order_id: truth.systemOrderId ?? payment.gatewayOrderId ?? undefined,
+        amount: truth.amount ?? undefined,
+        payment: { utr: truth.utr, customer_vpa: truth.customerVpa },
+      },
+    },
+    { alreadyVerified: true },
+  );
 }
 
 /**

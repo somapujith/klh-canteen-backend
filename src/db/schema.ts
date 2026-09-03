@@ -133,14 +133,14 @@ export interface Order {
   awaitingPayment: boolean;
 }
 
-/** UPI payment through VyaparGateway. See services/paymentService.ts. */
+/** UPI payment through SafeUPI. See services/paymentService.ts. */
 export type PaymentStatus = "PENDING" | "SUCCESS" | "FAILED" | "EXPIRED";
 
 export interface Payment {
   id: string;
-  /** Our reference, sent as the gateway's `client_txn_id`. Unique. */
+  /** Our reference, sent as SafeUPI's `merchant_order_id`. Unique. */
   clientTxnId: string;
-  /** The gateway's own id, known once create_order returns. */
+  /** SafeUPI's `system_order_id`, known once order/create returns. */
   gatewayOrderId: string | null;
   amount: string;
   currency: string;
@@ -155,7 +155,17 @@ export interface Payment {
   expiresAt: Date | null;
   paidAt: Date | null;
   failureReason: string | null;
-  /** Last accepted webhook's key. Guards against replayed deliveries. */
+  /** SafeUPI's hosted checkout page, where the student is sent to pay. */
+  paymentUrl: string | null;
+  /** The connected merchant SafeUPI routed this payment to, after fallback. */
+  linkedMerchantId: string | null;
+  /** sha256 of that merchant's UPI ID, as SafeUPI returns it. */
+  merchantUpiHash: string | null;
+  /** Whether the outcome was confirmed against SafeUPI's Status API rather
+   *  than believed from the unsigned webhook alone. */
+  verifiedViaStatusApi: boolean;
+  /** Derived per settled transaction (outcome + UTR), since SafeUPI sends no
+   *  idempotency key of its own. Guards against replayed deliveries. */
   idempotencyKey: string | null;
   webhookCount: number;
   createdAt: Date;

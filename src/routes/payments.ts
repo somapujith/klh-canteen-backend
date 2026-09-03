@@ -17,6 +17,7 @@ import {
   reconcileWithGateway,
   verifyWebhook,
   type PaymentRow,
+  type WebhookPayload,
   type SettlementResult,
 } from "../services/paymentService.js";
 import { emitOrderCreated, emitStockChanged } from "../services/sseService.js";
@@ -204,11 +205,14 @@ paymentsRouter.post("/checkout", optionalStudentAuth, checkoutLimiter, async (c)
       amount: payment.amount,
       currency: payment.currency,
       expiresAt: payment.expiresAt.toISOString(),
+      // Where the client sends the student. Under the hosted-page flow this is
+      // the entire payment UI, so it is the one field the client cannot do
+      // without.
+      paymentUrl: payment.paymentUrl,
+      // Returned only for selected businesses, so usually null. Passed through
+      // for a desktop user who would rather scan than be redirected; the hosted
+      // page renders its own QR either way.
       qrCode: payment.qrCode,
-      upiString: payment.upiString,
-      upiIntent: payment.upiIntent,
-      merchantUpiId: payment.merchantUpiId,
-      merchantName: payment.merchantName,
       orderIds,
     },
     201,
@@ -267,19 +271,24 @@ paymentsRouter.get("/:id", optionalStudentAuth, statusLimiter, async (c) => {
 /**
  * Gateway webhook.
  *
- * PUBLIC — and deliberately so. It is authenticated by the HMAC signature over
- * the raw body, not by any session, because the caller is VyaparGateway's
- * servers rather than a browser. Three details are load-bearing:
+ * PUBLIC — and deliberately so. The caller is SafeUPI's servers rather than a
+ * browser, so there is no session to authenticate against.
  *
- *   1. c.req.text() reads the body EXACTLY as sent. Parsing to JSON and
- *      re-serialising would change key order, spacing and number formatting,
- *      and the signature would never match. The gateway's own dashboard sample
- *      code makes this mistake; the API documentation does not.
- *   2. The signature is checked BEFORE the body is parsed or used, so an
- *      unsigned payload never reaches any logic that could act on it.
- *   3. A verified delivery is always answered 200, even when it changed
- *      nothing. The gateway retries anything else, and a duplicate that we
- *      correctly ignored is not a failure worth retrying.
+ * WHAT AUTHENTICATES IT, AND WHY THAT IS NOT ENOUGH. SafeUPI does not sign its
+ * webhooks; it echoes a shared secret in the request body. That is a bearer
+ * check: it says the sender knew the secret, and nothing at all about whether
+ * the payload is true. Anything that ever sees one delivery — a log line, a
+ * proxy, a misdirected request — learns the secret and can then forge a
+ * "success" for any order it can name.
+ *
+ * So the secret only buys the caller the right to be listened to. Before a
+ * single order is released, applyWebhook independently asks SafeUPI's Status
+ * API what actually happened, and the gateway's answer overrides whatever the
+ * payload claimed. Forging a delivery is therefore not enough on its own.
+ *
+ * A verified delivery is always answered 200, even when it changed nothing:
+ * SafeUPI retries anything else, and a duplicate we correctly ignored is not a
+ * failure worth retrying.
  */
 paymentsRouter.post("/webhook", async (c) => {
   const bindings = getBindings(c);
@@ -290,27 +299,10 @@ paymentsRouter.post("/webhook", async (c) => {
   }
 
   const config = getPaymentConfig(bindings);
-  const rawBody = await c.req.text();
-
-  const verification = await verifyWebhook(
-    config.webhookSecret,
-    {
-      signature: c.req.header("X-VyaparGateway-Signature"),
-      timestamp: c.req.header("X-VyaparGateway-Timestamp"),
-    },
-    rawBody,
-  );
-
-  if (!verification.ok) {
-    // Logged without the body: an unverified payload is attacker-controlled
-    // and does not belong in our logs.
-    console.warn("[payments] rejected webhook:", verification.reason);
-    return c.json({ error: "Invalid signature" }, 401);
-  }
 
   let payload: unknown;
   try {
-    payload = JSON.parse(rawBody);
+    payload = await c.req.json();
   } catch {
     return c.json({ error: "Malformed payload" }, 400);
   }
@@ -318,8 +310,19 @@ paymentsRouter.post("/webhook", async (c) => {
     return c.json({ error: "Malformed payload" }, 400);
   }
 
+  const body = payload as { secret?: unknown };
+  const verification = verifyWebhook(config.webhookSecret, body.secret);
+  if (!verification.ok) {
+    // Logged without the body: an unverified payload is attacker-controlled,
+    // and in this scheme the body carries a credential — logging it would leak
+    // the very secret being checked.
+    console.warn("[payments] rejected webhook:", verification.reason);
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
   const pool = getRequestPool(c);
-  const result = await applyWebhook(pool, payload as Record<string, any>);
+  // `config` is what turns on the Status API confirmation — see applyWebhook.
+  const result = await applyWebhook(pool, payload as WebhookPayload, { config });
 
   if (!result.changed) {
     // Duplicate, unmatched, or already terminal. All are 200: the delivery was

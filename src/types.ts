@@ -70,36 +70,41 @@ export interface Bindings {
    */
   PAYMENTS_ENABLED?: string;
   /**
-   * VyaparGateway live API key (`vg_live_...`). Authenticates our create_order
-   * and check_order_status calls, sent as the X-API-Key header so it never
-   * rides in a request body that might be logged.
+   * SafeUPI API key, sent as `secret` in every request body.
    *
-   * Secret — `wrangler secret put VYAPAR_API_KEY`. Never in wrangler.jsonc.
+   * SafeUPI offers no header form, so this credential necessarily travels in
+   * the body — which is why nothing in paymentService.ts ever logs a request
+   * body, only responses.
+   *
+   * Secret — `wrangler secret put SAFEUPI_API_SECRET`.
    */
-  VYAPAR_API_KEY?: string;
+  SAFEUPI_API_SECRET?: string;
   /**
-   * Webhook signing secret (`whsec_...`). The HMAC-SHA256 key every inbound
-   * webhook signature is checked against; it is what distinguishes a real
-   * payment notification from anyone who has guessed the endpoint URL. Without
-   * it a POST claiming "payment.success" would release food for free.
+   * The value SafeUPI echoes back inside a webhook body.
    *
-   * Secret — `wrangler secret put VYAPAR_WEBHOOK_SECRET`.
+   * NOT a signing key: SafeUPI does not sign its webhooks, so this proves only
+   * that the sender knows the secret and nothing about the payload's
+   * integrity. It is therefore necessary but not sufficient — every settlement
+   * is independently confirmed against SafeUPI's Status API before food is
+   * released. Treat it like a password all the same: anything that ever logs a
+   * webhook body leaks it.
+   *
+   * Secret — `wrangler secret put SAFEUPI_WEBHOOK_SECRET`.
    */
-  VYAPAR_WEBHOOK_SECRET?: string;
+  SAFEUPI_WEBHOOK_SECRET?: string;
   /**
-   * Public HTTPS URL of our own webhook endpoint, sent as `callback_url` on
-   * every create_order. Must be reachable from the public internet — the
-   * gateway's servers call it, not the browser — so localhost only works
-   * behind a tunnel.
+   * Where SafeUPI returns the student's browser after the hosted payment page.
+   * A public frontend URL, so it lives in vars rather than as a secret.
    *
-   * Per-order and therefore authoritative over whatever is configured in the
-   * VyaparGateway dashboard, which lets a staging deploy receive its own
-   * webhooks without disturbing production.
+   * The payment id is appended as a query parameter at create time, so this
+   * should be the bare landing route.
    */
-  VYAPAR_CALLBACK_URL?: string;
-  /** Where the gateway sends the student's browser after payment. Optional —
-   *  omitted when unset, and the in-app poll is what actually decides the UI. */
-  VYAPAR_REDIRECT_URL?: string;
+  SAFEUPI_REDIRECT_URL?: string;
+  /**
+   * Optional connected-merchant id to route payments to. Omitted, SafeUPI uses
+   * the business default and falls back to other eligible merchants.
+   */
+  SAFEUPI_MERCHANT_ID?: string;
 }
 
 export interface AuthUser {
