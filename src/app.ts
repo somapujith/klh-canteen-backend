@@ -17,6 +17,9 @@ import { superAdminStudentsRouter } from "./routes/superadminStudents.js";
 import { superAdminCohortsRouter } from "./routes/superadminCohorts.js";
 import { superAdminExportsRouter } from "./routes/superadminExports.js";
 import { telegramRouter } from "./routes/telegram.js";
+import { paymentsRouter } from "./routes/payments.js";
+import { paymentsEnabled } from "./services/paymentService.js";
+import { getBindings } from "./lib/context.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { rateLimit } from "./middleware/rateLimit.js";
 import type { AppEnv } from "./types.js";
@@ -100,6 +103,17 @@ export function createApp() {
 
   app.get("/health", (c) => c.json({ status: "ok" }));
 
+  // Public feature flags the client needs before it can render a correct
+  // checkout. Payments being on or off changes what the pay button does, and
+  // the client cannot discover that by trying — a checkout POST against a
+  // payments-disabled deploy would 503 only after the order was already
+  // placed. Nothing secret is exposed: this reports THAT payments are on,
+  // never the credentials that make them work.
+  app.get("/config", (c) => {
+    const bindings = getBindings(c);
+    return c.json({ paymentsEnabled: paymentsEnabled(bindings) });
+  });
+
   app.route("/auth", authRouter);
   app.route("/menu", menuRouter);
   app.route("/admin", adminMenuRouter);
@@ -118,6 +132,9 @@ export function createApp() {
   app.route("/superadmin/exports", superAdminExportsRouter);
   // Student Telegram link + bot webhook (students only; staff/guest never linked).
   app.route("/telegram", telegramRouter);
+  // UPI payments. POST /payments/webhook is public and authenticated by HMAC
+  // signature over the raw body rather than by session — see routes/payments.ts.
+  app.route("/payments", paymentsRouter);
 
   app.onError(async (err, c) => {
     const res = await errorHandler(err, c);

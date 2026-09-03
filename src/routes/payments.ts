@@ -1,0 +1,430 @@
+import { Hono } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
+import { z } from "zod";
+import { requireAuth } from "../middleware/auth.js";
+import { rateLimit } from "../middleware/rateLimit.js";
+import { getBindings, getRequestPool } from "../lib/context.js";
+import { ApiError } from "../middleware/errorHandler.js";
+import { logAction } from "../services/auditService.js";
+import {
+  applyWebhook,
+  expireStalePayments,
+  getPaymentConfig,
+  getPaymentForOwner,
+  initiatePayment,
+  paymentsEnabled,
+  releaseUnpaidOrders,
+  reconcileWithGateway,
+  verifyWebhook,
+  type PaymentRow,
+  type SettlementResult,
+} from "../services/paymentService.js";
+import { emitOrderCreated, emitStockChanged } from "../services/sseService.js";
+import { notifyStudentOrderTelegram } from "../services/telegramService.js";
+import { toOrderSummary } from "../lib/orderSummary.js";
+import { verifyGuestSession } from "../services/guestSessionService.js";
+import { sql, query } from "../db/sql.js";
+import type { AppEnv } from "../types.js";
+
+/**
+ * UPI payment endpoints.
+ *
+ * Callers: mounted from app.ts at /payments.
+ * Endpoints:
+ *   POST /payments/checkout      (STUDENT or guest session) — open a payment
+ *   GET  /payments/:id           (owner only)               — poll status
+ *   POST /payments/webhook       (public, signature-verified) — settle
+ *
+ * The webhook is the only public route here, and it authenticates by HMAC
+ * signature rather than by session — see the note above the handler.
+ */
+export const paymentsRouter = new Hono<AppEnv>();
+
+const GUEST_SESSION_HEADER = "X-Guest-Session";
+
+/** Serialised payment, minus anything the owner has no use for. The webhook
+ *  secret never touches this file, but the QR payload is large and only worth
+ *  sending while the payment can still be completed. */
+function serializePayment(payment: PaymentRow, includeQr: boolean) {
+  return {
+    id: payment.id,
+    status: payment.status,
+    amount: Number(payment.amount).toFixed(2),
+    currency: payment.currency,
+    expiresAt: payment.expiresAt?.toISOString() ?? null,
+    paidAt: payment.paidAt?.toISOString() ?? null,
+    upiTxnId: payment.upiTxnId,
+    payerVpa: payment.payerVpa,
+    failureReason: payment.failureReason,
+    ...(includeQr
+      ? { qrCode: payment.qrCode, upiString: payment.upiString }
+      : {}),
+  };
+}
+
+/**
+ * Resolves the caller as either an authenticated student or a valid guest
+ * session, and refuses anyone who is neither.
+ *
+ * Payments are open to both because ordering is: a walk-up guest with a
+ * session must be able to pay for the cart they just placed. The guest branch
+ * verifies the signed session exactly as routes/guest.ts does rather than
+ * trusting the header.
+ */
+function resolveOwner(c: Context<AppEnv>): { studentId?: string; guestSessionId?: string } {
+  const user = c.get("user");
+  if (user) return { studentId: user.id };
+
+  // Same two shapes routes/guest.ts accepts, so a guest client needs no
+  // special-casing for the payment endpoints.
+  const header = c.req.header(GUEST_SESSION_HEADER);
+  const authHeader = c.req.header("Authorization");
+  const token = header || (authHeader?.startsWith("Guest ") ? authHeader.slice(6) : "");
+  if (!token) {
+    throw new ApiError(401, "UNAUTHORIZED", "Sign in or start a guest session to pay.");
+  }
+
+  const { QR_TOKEN_SECRET } = getBindings(c);
+  const sessionId = verifyGuestSession(token, QR_TOKEN_SECRET);
+  if (!sessionId) {
+    throw new ApiError(401, "INVALID_GUEST_SESSION", "Guest session is invalid or has expired");
+  }
+  return { guestSessionId: sessionId };
+}
+
+/**
+ * Attaches the student when a Bearer token is present, and otherwise lets the
+ * request through unauthenticated so resolveOwner can try the guest branch.
+ *
+ * requireAuth() cannot express this — it refuses an anonymous request outright
+ * — and these routes must serve both an enrolled student and a walk-up guest.
+ * A malformed or expired token is NOT quietly ignored: it still fails, because
+ * silently downgrading a bad student token to "anonymous" would turn an auth
+ * error into a confusing 401 from the guest branch instead.
+ */
+const optionalStudentAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) return next();
+  return requireAuth("STUDENT")(c, next);
+};
+
+const checkoutSchema = z.object({
+  orderIds: z.array(z.string().uuid()).min(1).max(4),
+});
+
+const checkoutLimiter = rateLimit({
+  prefix: "payments-checkout",
+  windowSeconds: 60,
+  max: 10,
+  code: "TOO_MANY_REQUESTS",
+  message: "Too many payment attempts, please wait a minute.",
+});
+
+/**
+ * Opens a payment for orders that are already placed and holding stock.
+ *
+ * Split from order creation on purpose: the orders exist and their portions
+ * are reserved before any money is involved, so a gateway failure costs a
+ * cancelled order rather than a student who was charged for food that had
+ * already sold out.
+ */
+paymentsRouter.post("/checkout", optionalStudentAuth, checkoutLimiter, async (c) => {
+  const bindings = getBindings(c);
+  if (!paymentsEnabled(bindings)) {
+    throw new ApiError(503, "PAYMENTS_DISABLED", "Online payment is not available right now.");
+  }
+
+  const { orderIds } = checkoutSchema.parse(await c.req.json());
+  const pool = getRequestPool(c);
+  const owner = resolveOwner(c);
+
+  // Names on the gateway's receipt. Read from our own records rather than
+  // accepted from the request: a student does not get to decide what name
+  // appears against a transaction.
+  let customerName = "Customer";
+  let customerMobile: string | undefined;
+  let customerEmail: string | undefined;
+  if (owner.studentId) {
+    const { rows } = await query<{ name: string | null; email: string | null }>(
+      pool,
+      sql`SELECT "name", "email" FROM "User" WHERE "id" = ${owner.studentId}::text LIMIT 1`,
+    );
+    customerName = rows[0]?.name || "Customer";
+    customerEmail = rows[0]?.email || undefined;
+  } else {
+    const { rows } = await query<{ guestName: string | null; guestPhone: string | null }>(
+      pool,
+      sql`
+        SELECT "guestName", "guestPhone" FROM "Order"
+         WHERE "id" = ANY(${orderIds}::text[]) AND "guestSessionId" = ${owner.guestSessionId}::text
+         LIMIT 1
+      `,
+    );
+    customerName = rows[0]?.guestName || "Guest";
+    // The gateway wants exactly ten digits; anything else is dropped rather
+    // than sent and rejected.
+    const digits = (rows[0]?.guestPhone ?? "").replace(/\D/g, "");
+    if (digits.length === 10) customerMobile = digits;
+  }
+
+  let payment;
+  try {
+    payment = await initiatePayment(pool, bindings, {
+      orderIds,
+      owner: { ...owner, customerName, customerMobile, customerEmail },
+      productInfo: "Canteen order",
+    });
+  } catch (err) {
+    // The orders were written before the gateway was called, so that stock is
+    // held while the student pays. No payment ever opened against them, so
+    // holding that food for the full reservation TTL would take it off sale for
+    // hours over a failure the student cannot do anything about. Hand it back
+    // now and let them retry with a clean cart.
+    //
+    // Best-effort: the original failure is what the student needs to hear, so a
+    // problem releasing must not replace it with a different error.
+    await releaseUnpaidOrders(pool, orderIds).catch((releaseErr) =>
+      console.error("[payments] failed to release orders after a failed checkout", releaseErr),
+    );
+    throw err;
+  }
+
+  if (owner.studentId) {
+    await logAction(pool, owner.studentId, "PAYMENT_INITIATED", "Payment", payment.paymentId, {
+      amount: payment.amount,
+      orderIds,
+      gatewayOrderId: payment.gatewayOrderId,
+    });
+  }
+
+  return c.json(
+    {
+      paymentId: payment.paymentId,
+      status: payment.status,
+      amount: payment.amount,
+      currency: payment.currency,
+      expiresAt: payment.expiresAt.toISOString(),
+      qrCode: payment.qrCode,
+      upiString: payment.upiString,
+      upiIntent: payment.upiIntent,
+      merchantUpiId: payment.merchantUpiId,
+      merchantName: payment.merchantName,
+      orderIds,
+    },
+    201,
+  );
+});
+
+const statusLimiter = rateLimit({
+  prefix: "payments-status",
+  windowSeconds: 60,
+  // The client polls this every couple of seconds for up to two minutes while
+  // the student is paying, so the ceiling is well above the order limiter's.
+  max: 90,
+  code: "TOO_MANY_REQUESTS",
+  message: "Too many status checks, please slow down.",
+});
+
+/**
+ * Where the client waits while the student pays.
+ *
+ * A still-PENDING payment triggers a reconciliation call to the gateway,
+ * because the webhook is not guaranteed: if that delivery was dropped, this
+ * poll is what discovers the payment actually succeeded. Any settlement it
+ * finds runs through the same applyWebhook path a real delivery would, so
+ * there is exactly one implementation of "what happens when money arrives".
+ */
+paymentsRouter.get("/:id", optionalStudentAuth, statusLimiter, async (c) => {
+  const bindings = getBindings(c);
+  const pool = getRequestPool(c);
+  const paymentId = z.string().uuid().parse(c.req.param("id"));
+  const owner = resolveOwner(c);
+
+  let payment = await getPaymentForOwner(pool, paymentId, owner);
+  if (!payment) throw new ApiError(404, "NOT_FOUND", "Payment not found");
+
+  if (payment.status === "PENDING" && paymentsEnabled(bindings)) {
+    // Past its window and still undecided: close it out rather than asking the
+    // gateway about a QR nobody can scan any more.
+    if (payment.expiresAt && payment.expiresAt.getTime() < Date.now()) {
+      await expireStalePayments(pool);
+    } else {
+      try {
+        const settled = await reconcileWithGateway(pool, bindings, payment);
+        if (settled?.changed) await broadcastSettlement(c, settled);
+      } catch (err) {
+        // A gateway hiccup must not break the poll — the client simply sees
+        // PENDING and asks again, and the webhook may still land.
+        console.warn("[payments] reconciliation failed", paymentId, err);
+      }
+    }
+    payment = (await getPaymentForOwner(pool, paymentId, owner)) ?? payment;
+  }
+
+  return c.json(serializePayment(payment, payment.status === "PENDING"));
+});
+
+/**
+ * Gateway webhook.
+ *
+ * PUBLIC — and deliberately so. It is authenticated by the HMAC signature over
+ * the raw body, not by any session, because the caller is VyaparGateway's
+ * servers rather than a browser. Three details are load-bearing:
+ *
+ *   1. c.req.text() reads the body EXACTLY as sent. Parsing to JSON and
+ *      re-serialising would change key order, spacing and number formatting,
+ *      and the signature would never match. The gateway's own dashboard sample
+ *      code makes this mistake; the API documentation does not.
+ *   2. The signature is checked BEFORE the body is parsed or used, so an
+ *      unsigned payload never reaches any logic that could act on it.
+ *   3. A verified delivery is always answered 200, even when it changed
+ *      nothing. The gateway retries anything else, and a duplicate that we
+ *      correctly ignored is not a failure worth retrying.
+ */
+paymentsRouter.post("/webhook", async (c) => {
+  const bindings = getBindings(c);
+  if (!paymentsEnabled(bindings)) {
+    // Nothing to settle against. 200 rather than an error so the gateway does
+    // not retry a delivery this deployment will never accept.
+    return c.json({ received: true, ignored: "payments disabled" }, 200);
+  }
+
+  const config = getPaymentConfig(bindings);
+  const rawBody = await c.req.text();
+
+  const verification = await verifyWebhook(
+    config.webhookSecret,
+    {
+      signature: c.req.header("X-VyaparGateway-Signature"),
+      timestamp: c.req.header("X-VyaparGateway-Timestamp"),
+    },
+    rawBody,
+  );
+
+  if (!verification.ok) {
+    // Logged without the body: an unverified payload is attacker-controlled
+    // and does not belong in our logs.
+    console.warn("[payments] rejected webhook:", verification.reason);
+    return c.json({ error: "Invalid signature" }, 401);
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawBody);
+  } catch {
+    return c.json({ error: "Malformed payload" }, 400);
+  }
+  if (typeof payload !== "object" || payload === null) {
+    return c.json({ error: "Malformed payload" }, 400);
+  }
+
+  const pool = getRequestPool(c);
+  const result = await applyWebhook(pool, payload as Record<string, any>);
+
+  if (!result.changed) {
+    // Duplicate, unmatched, or already terminal. All are 200: the delivery was
+    // genuine and there is nothing for the gateway to retry.
+    console.info("[payments] webhook no-op:", result.reason);
+    return c.json({ received: true }, 200);
+  }
+
+  await broadcastSettlement(c, result);
+  return c.json({ received: true }, 200);
+});
+
+/**
+ * Pushes a settlement out to everyone watching.
+ *
+ * Confirmed orders appear on the kitchen board for the first time here — they
+ * were hidden while awaiting payment — so this emits the same
+ * order-created frame that routes/orders.ts emits for an unpaid-flow order.
+ * Released orders hand their stock back, so the menu is told too.
+ *
+ * Every step is best-effort: the money is already settled and the database
+ * already reflects it, so a failed broadcast must never turn into a non-200
+ * that makes the gateway retry a completed settlement.
+ */
+async function broadcastSettlement(c: any, result: SettlementResult): Promise<void> {
+  const bindings = getBindings(c);
+  const pool = getRequestPool(c);
+
+  try {
+    if (result.confirmedOrderIds.length > 0) {
+      const { rows } = await query<any>(
+        pool,
+        sql`
+          SELECT o."id", o."orderNumber", o."status", o."kitchen", o."totalAmount",
+                 o."createdAt", o."collectionAt", o."seenByAdmin", o."studentId",
+                 o."guestName",
+                 u."name" AS "studentName", u."rollNumber" AS "rollNumber",
+                 (SELECT COUNT(*)::int FROM "OrderItem" oi WHERE oi."orderId" = o."id") AS "itemCount"
+            FROM "Order" o
+            LEFT JOIN "User" u ON u."id" = o."studentId"
+           WHERE o."id" = ANY(${result.confirmedOrderIds}::text[])
+        `,
+      );
+
+      await emitOrderCreated(
+        bindings,
+        rows.map((row) =>
+          toOrderSummary({
+            ...row,
+            student: { name: row.studentName, rollNumber: row.rollNumber },
+            // toOrderSummary counts items from the array's length; the count
+            // was aggregated in SQL rather than joining every line back.
+            items: new Array(Number(row.itemCount)),
+          }),
+        ),
+      );
+
+      // Student-only Telegram order log, matching the unpaid flow's.
+      for (const row of rows) {
+        if (!row.studentId) continue;
+        const { rows: lines } = await query<{ name: string; quantity: number }>(
+          pool,
+          sql`
+            SELECT mi."name", oi."quantity"
+              FROM "OrderItem" oi
+              JOIN "MenuItem" mi ON mi."id" = oi."menuItemId"
+             WHERE oi."orderId" = ${row.id}::text
+          `,
+        );
+        await notifyStudentOrderTelegram(pool, bindings, {
+          studentId: row.studentId,
+          orderNumber: row.orderNumber,
+          status: row.status,
+          kitchen: row.kitchen,
+          totalAmount: String(row.totalAmount),
+          items: lines.map((l) => ({ name: l.name, quantity: l.quantity })),
+          kind: "created",
+        });
+      }
+    }
+
+    // A released order gave its portions back, so every open menu needs the
+    // new sellable level.
+    const touched = [...result.confirmedOrderIds, ...result.releasedOrderIds];
+    if (result.releasedOrderIds.length > 0 && touched.length > 0) {
+      const { rows: stock } = await query<{ id: string; stockQty: number; reservedQty: number }>(
+        pool,
+        sql`
+          SELECT DISTINCT mi."id", mi."stockQty", mi."reservedQty"
+            FROM "MenuItem" mi
+            JOIN "OrderItem" oi ON oi."menuItemId" = mi."id"
+           WHERE oi."orderId" = ANY(${result.releasedOrderIds}::text[])
+        `,
+      );
+      if (stock.length > 0) {
+        await emitStockChanged(
+          bindings,
+          stock.map((item) => ({
+            menuItemId: item.id,
+            stockQty: Math.max(0, item.stockQty - item.reservedQty),
+          })),
+        );
+      }
+    }
+  } catch (err) {
+    console.error("[payments] settlement broadcast failed", err);
+  }
+}

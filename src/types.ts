@@ -57,6 +57,49 @@ export interface Bindings {
    *  against this value, so a student token cannot be replayed as a guest
    *  session or vice versa. See services/googleGuestService.ts. */
   GOOGLE_CLIENT_ID_GUEST?: string;
+  /**
+   * Master switch for UPI payments. "true" (case-insensitive) turns checkout
+   * on; anything else, including absent, leaves ordering exactly as it was
+   * before payments existed.
+   *
+   * Off is the safe default on purpose. Flipping it on with the secrets
+   * missing does NOT half-enable the feature — services/paymentService.ts's
+   * paymentsEnabled() requires both the flag and the credentials, so a
+   * misconfigured deploy presents no checkout rather than one that cannot
+   * settle.
+   */
+  PAYMENTS_ENABLED?: string;
+  /**
+   * VyaparGateway live API key (`vg_live_...`). Authenticates our create_order
+   * and check_order_status calls, sent as the X-API-Key header so it never
+   * rides in a request body that might be logged.
+   *
+   * Secret — `wrangler secret put VYAPAR_API_KEY`. Never in wrangler.jsonc.
+   */
+  VYAPAR_API_KEY?: string;
+  /**
+   * Webhook signing secret (`whsec_...`). The HMAC-SHA256 key every inbound
+   * webhook signature is checked against; it is what distinguishes a real
+   * payment notification from anyone who has guessed the endpoint URL. Without
+   * it a POST claiming "payment.success" would release food for free.
+   *
+   * Secret — `wrangler secret put VYAPAR_WEBHOOK_SECRET`.
+   */
+  VYAPAR_WEBHOOK_SECRET?: string;
+  /**
+   * Public HTTPS URL of our own webhook endpoint, sent as `callback_url` on
+   * every create_order. Must be reachable from the public internet — the
+   * gateway's servers call it, not the browser — so localhost only works
+   * behind a tunnel.
+   *
+   * Per-order and therefore authoritative over whatever is configured in the
+   * VyaparGateway dashboard, which lets a staging deploy receive its own
+   * webhooks without disturbing production.
+   */
+  VYAPAR_CALLBACK_URL?: string;
+  /** Where the gateway sends the student's browser after payment. Optional —
+   *  omitted when unset, and the in-app poll is what actually decides the UI. */
+  VYAPAR_REDIRECT_URL?: string;
 }
 
 export interface AuthUser {
