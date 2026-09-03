@@ -13,7 +13,9 @@
     "seed:admin": "tsx scripts/seedAdmin.ts",
     "migrate:deploy": "tsx scripts/migrate.ts",
     "test:db:migrate": "tsx tests/setup/migrateTestDatabase.ts",
-    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit"
+    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit",
+    "test:db:up": "node scripts/testDb.mjs up",
+    "test:db:down": "node scripts/testDb.mjs down"
   },
   "keywords": [],
   "author": "",

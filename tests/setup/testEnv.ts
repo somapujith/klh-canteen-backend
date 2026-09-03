@@ -21,6 +21,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { config as loadDotenv } from "dotenv";
+import { neonConfig } from "@neondatabase/serverless";
 import { assertSafeTestDatabaseUrl, REPO_ROOT, type ParsedTarget } from "./databaseGuard.js";
 
 export interface TestEnv {
@@ -85,5 +86,51 @@ function compute(): TestEnv {
   // guard approved. src/lib/context.ts reads this via hono/adapter's env().
   process.env.DATABASE_URL = candidate;
 
+  configureNeonForLocalPostgres(target);
+
   return { hasDatabase: true, reason: "", databaseUrl: candidate, target };
+}
+
+/**
+ * Points @neondatabase/serverless at a local Postgres.
+ *
+ * The driver talks WebSockets to Neon's endpoint, not the raw Postgres wire
+ * protocol, so a plain `postgres:16` container is unreachable to it: the
+ * connection fails with an opaque ErrorEvent rather than a refusal that names
+ * a cause. `neondatabase/wsproxy` bridges the two, and these three settings
+ * are what redirect the driver to it:
+ *
+ *   - `wsProxy`             where to open the WebSocket
+ *   - `useSecureWebSocket`  false — the local proxy is ws://, not wss://
+ *   - `pipelineConnect`     disabled — that optimisation assumes Neon's own
+ *                           auth handshake, which the proxy does not perform
+ *
+ * Applied only for a local target. A remote Neon branch (the CI path, and the
+ * `ALLOW_REMOTE_TEST_DATABASE=1` path) speaks the real protocol and must be
+ * left alone entirely.
+ */
+function configureNeonForLocalPostgres(target: ParsedTarget): void {
+  if (!target.isLocal) return;
+
+  const proxyPort = process.env.TEST_WS_PROXY_PORT?.trim() || "55434";
+  // The proxy fronts the database, so the driver connects to IT rather than to
+  // Postgres' own port — and it needs telling, via ?address=, which backend to
+  // open on the far side. Without that parameter wsproxy logs `allowed=false`
+  // and closes the socket, which surfaces as a bare ErrorEvent with no cause.
+  //
+  // The ?address= is resolved INSIDE the proxy container, so it must name the
+  // database as that container sees it — the Docker service name and its
+  // internal port — not the host-published localhost:55433, which inside the
+  // container resolves to the proxy itself and is refused.
+  //
+  // The wsproxy container must also run with ALLOW_ADDR_REGEX='.*'; it
+  // otherwise permits only *.neon.tech:5432 and rejects a local backend with
+  // `allowed=false`, surfacing as a bare ErrorEvent with no cause.
+  const backend = process.env.TEST_WS_PROXY_BACKEND?.trim() || "klh-testdb:5432";
+  neonConfig.wsProxy = () => `localhost:${proxyPort}/v1?address=${backend}`;
+  neonConfig.useSecureWebSocket = false;
+  neonConfig.pipelineConnect = false;
+  // Node does not expose a global WebSocket in every supported version, so the
+  // driver is handed one explicitly rather than left to discover one.
+  neonConfig.webSocketConstructor = WebSocket;
 }

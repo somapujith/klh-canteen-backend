@@ -26,3 +26,8 @@ scripts/perf/*.json
 
 # Local dumps of production order data (student names, order history).
 order-backup-*.json
+
+# Pre-migration safety snapshots. These hold real order rows (student ids,
+# tokens, amounts), so they are local evidence for a single migration and
+# never repo content.
+pre-migration-*.json
