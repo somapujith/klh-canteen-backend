@@ -131,7 +131,9 @@ async function seedAwaitingPayment(options: { qty?: number; amount?: string; pri
  * the gateway's own answer. That is the point — a webhook alone proves nothing
  * here, which is precisely the property being tested.
  */
-let gatewayTruth: { status: string; amount: string | number; utr?: string | null } | null = null;
+let gatewayTruth:
+  | { status: string; amount: string | number; utr?: string | null; vpa?: string | null }
+  | null = null;
 /** Set to make the Status API call fail, as an unreachable gateway would. */
 let gatewayUnreachable = false;
 
@@ -156,7 +158,13 @@ beforeAll(() => {
             merchant_order_id: body.merchant_order_id,
             status: gatewayTruth.status,
             amount: String(gatewayTruth.amount),
-            payment: { utr: gatewayTruth.utr ?? "100852466451", customer_vpa: "student@upi" },
+            payment: {
+              // `?? default` would override an explicit null, which is exactly
+              // the case the disagreement test needs: a gateway that reports no
+              // UTR at all.
+              utr: "utr" in gatewayTruth ? gatewayTruth.utr : "100852466451",
+              customer_vpa: "vpa" in gatewayTruth ? gatewayTruth.vpa : "student@upi",
+            },
           },
         }),
         { status: 200 },
@@ -397,6 +405,39 @@ describeDb("payment settlement", () => {
     expect(order.status).toBe("PENDING");
     expect((await readPayment(paymentId)).status).toBe("PENDING");
     expect(await readReserved(item.id)).toBe(qty);
+  });
+
+  /**
+   * Found by probing the real endpoint: the forged webhook was correctly
+   * refused, but its fabricated UTR was still written to the payment row,
+   * because the write fell back to the payload when the gateway had no UTR of
+   * its own. Nothing was released, so it looked fine — while quietly poisoning
+   * the fields a later dispute is read from.
+   */
+  it("stores no attacker-supplied data from a webhook the gateway disagrees with", async () => {
+    const { paymentId, clientTxnId } = await seedAwaitingPayment();
+
+    gatewayTruth = { status: "pending", amount: "30.00", utr: null, vpa: null };
+    await postWebhook(
+      webhookBody("success", clientTxnId, {
+        payment: { utr: "999888777666", customer_vpa: "attacker@upi" },
+        customer_name: "Attacker",
+      }),
+    );
+
+    const { rows } = await query<{
+      upiTxnId: string | null;
+      payerVpa: string | null;
+      idempotencyKey: string | null;
+    }>(
+      pool,
+      sql`SELECT "upiTxnId","payerVpa","idempotencyKey" FROM "Payment" WHERE "id" = ${paymentId}::text`,
+    );
+    expect(rows[0].upiTxnId).toBeNull();
+    expect(rows[0].payerVpa).toBeNull();
+    // The replay key must not be attacker-chosen either: it decides whether a
+    // later genuine delivery is mistaken for a duplicate and ignored.
+    expect(rows[0].idempotencyKey).toBeNull();
   });
 
   it("releases nothing when the gateway cannot be reached", async () => {

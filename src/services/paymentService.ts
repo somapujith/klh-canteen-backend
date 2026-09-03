@@ -886,11 +886,10 @@ export async function applyWebhook(
     // the values that are unique to a settled transaction: the outcome plus
     // the bank's UTR. A retry of the same delivery therefore produces the same
     // key and is answered as the no-op it is.
-    const deliveryKey = truth?.utr
-      ? `${incoming}:${truth.utr}`
-      : payload.data?.payment?.utr
-        ? `${incoming}:${payload.data.payment.utr}`
-        : null;
+    // Derived from the gateway's UTR only. A payload-supplied one would let a
+    // forged delivery choose the replay key, and so decide whether a later
+    // genuine delivery is mistaken for a duplicate and ignored.
+    const deliveryKey = truth?.utr ? `${incoming}:${truth.utr}` : null;
 
     if (deliveryKey && payment.idempotencyKey === deliveryKey) {
       await client.query("ROLLBACK");
@@ -959,15 +958,24 @@ export async function applyWebhook(
       }
     }
 
+    /**
+     * Settlement facts come ONLY from the gateway's own answer, never from the
+     * delivery.
+     *
+     * The payload is attacker-shaped in exactly the case that matters: a forged
+     * webhook carrying a plausible UTR would otherwise be written straight into
+     * the payment record, poisoning the fields a later dispute is read from —
+     * even though the order itself was correctly refused. `truth` is always
+     * populated by the time this runs; applyWebhook returns earlier otherwise.
+     */
     await query(
       client,
       sql`
         UPDATE "Payment"
            SET "status" = ${incoming}::text,
-               "upiTxnId" = COALESCE(${truth?.utr ?? payload.data?.payment?.utr ?? null}::text, "upiTxnId"),
-               "payerVpa" = COALESCE(${truth?.customerVpa ?? payload.data?.payment?.customer_vpa ?? null}::text, "payerVpa"),
-               "payerName" = COALESCE(${payload.data?.customer_name ?? null}::text, "payerName"),
-               "gatewayOrderId" = COALESCE("gatewayOrderId", ${truth?.systemOrderId ?? payload.data?.system_order_id ?? null}::text),
+               "upiTxnId" = COALESCE(${truth?.utr ?? null}::text, "upiTxnId"),
+               "payerVpa" = COALESCE(${truth?.customerVpa ?? null}::text, "payerVpa"),
+               "gatewayOrderId" = COALESCE("gatewayOrderId", ${truth?.systemOrderId ?? null}::text),
                "verifiedViaStatusApi" = ${verified}::boolean,
                "paidAt" = ${incoming === "SUCCESS" ? sql`NOW()` : sql`"paidAt"`},
                "failureReason" = ${
