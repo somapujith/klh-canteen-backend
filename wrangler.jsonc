@@ -25,7 +25,19 @@
     // Walk-up guest sign-in. A THIRD OAuth client, separate from the two
     // student ones above: the ID token's `aud` is checked against this value,
     // which is what stops a student token being replayed as a guest session.
-    "GOOGLE_CLIENT_ID_GUEST": "507951128349-7i31je511nega9ruvngftgvpa58rav4c.apps.googleusercontent.com"
+    "GOOGLE_CLIENT_ID_GUEST": "507951128349-7i31je511nega9ruvngftgvpa58rav4c.apps.googleusercontent.com",
+    // UPI payments master switch. "false" leaves ordering exactly as it was
+    // before payments existed; "true" makes checkout require payment. Flip it
+    // only after the three VYAPAR_* secrets below are set — paymentsEnabled()
+    // requires both the flag and the credentials, so a flag-only deploy
+    // presents no checkout rather than one that cannot settle.
+    "PAYMENTS_ENABLED": "false",
+    // Our own webhook endpoint, sent as callback_url on every create_order.
+    // Must be publicly reachable — the gateway's servers call it, not the
+    // browser. Not a secret (the gateway signs what it sends there, and the
+    // signature is what authenticates it), so it lives here where it is easy
+    // to point a staging deploy at itself.
+    "VYAPAR_CALLBACK_URL": "https://klh-canteen-backend.workers.dev/payments/webhook"
   },
 
   // Sensitive values are NOT set here. Before first deploy, run:
@@ -35,7 +47,14 @@
   //   wrangler secret put TELEGRAM_BOT_TOKEN
   //   wrangler secret put TELEGRAM_BOT_USERNAME
   //   wrangler secret put TELEGRAM_WEBHOOK_SECRET
+  //   wrangler secret put VYAPAR_API_KEY          (vg_live_...)
+  //   wrangler secret put VYAPAR_WEBHOOK_SECRET   (whsec_...)
   // These populate env.* at runtime without ever being committed to source control.
+  //
+  // VYAPAR_WEBHOOK_SECRET is the HMAC key every inbound payment notification is
+  // verified against. It is the only thing separating a real "payment.success"
+  // from anyone who has guessed the webhook URL, so it belongs nowhere but a
+  // secret — never in this file, never in a commit, never in a screenshot.
 
   // Retained only for any non-rate-limit use. Rate limit counters moved off
   // KV to the RATE_LIMITER_HUB Durable Object below: KV's get-then-put is not
