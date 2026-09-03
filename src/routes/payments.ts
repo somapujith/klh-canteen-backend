@@ -109,6 +109,17 @@ const optionalStudentAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
   return requireAuth("STUDENT")(c, next);
 };
 
+/**
+ * Whether a stored value is usable as an email address for the gateway.
+ *
+ * Deliberately a shape check, not validation: the only question is whether
+ * SafeUPI will accept it, and the cost of a false negative is a placeholder
+ * address rather than a failed payment.
+ */
+function looksLikeEmail(value: string | null | undefined): boolean {
+  return typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
 const checkoutSchema = z.object({
   orderIds: z.array(z.string().uuid()).min(1).max(4),
 });
@@ -151,7 +162,16 @@ paymentsRouter.post("/checkout", optionalStudentAuth, checkoutLimiter, async (c)
       sql`SELECT "name", "email" FROM "User" WHERE "id" = ${owner.studentId}::text LIMIT 1`,
     );
     customerName = rows[0]?.name || "Customer";
-    customerEmail = rows[0]?.email || undefined;
+    // Only forwarded when it actually looks like an address.
+    //
+    // User.email doubles as the login identifier, and most student accounts
+    // hold a bare username there rather than an email — 154 of them at the
+    // time of writing, which is the majority. Passing one straight through
+    // earned a `422 Valid customer email is required` from SafeUPI and a 502
+    // at checkout, i.e. most students could not pay at all. Anything that is
+    // not address-shaped is treated as absent so the placeholder below is
+    // used instead.
+    customerEmail = looksLikeEmail(rows[0]?.email) ? rows[0]!.email! : undefined;
   } else {
     const { rows } = await query<{ guestName: string | null; guestPhone: string | null }>(
       pool,

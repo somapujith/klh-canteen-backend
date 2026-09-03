@@ -551,6 +551,68 @@ describeDb("payment settlement", () => {
     expect(await readReserved(item.id)).toBe(qty);
   });
 
+  /**
+   * Found in the browser as a 502 at checkout.
+   *
+   * User.email doubles as the login identifier, and most student accounts hold
+   * a bare username there — a roll number, usually — rather than an address.
+   * Forwarding one to SafeUPI earned `422 Valid customer email is required`,
+   * so the majority of students could not pay at all.
+   */
+  it("does not send a non-address login identifier to the gateway as an email", async () => {
+    const student = await userRepo.insert(pool, {
+      role: "STUDENT",
+      rollNumber: null,
+      // Exactly the shape the live rows have: a roll number in the email column.
+      email: `24200${Math.floor(Math.random() * 1e5)}`,
+      passwordHash: await bcrypt.hash("x", 4),
+      name: "Username Only",
+      school: "KLH",
+    });
+    const item = await makeItem(10, "20.00");
+    const token = signToken({ sub: student.id, role: "STUDENT" }, process.env.JWT_SECRET!);
+
+    const placed = await request(server)
+      .post("/orders")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ items: [{ menuItemId: item.id, qty: 1 }] });
+    expect(placed.status).toBe(201);
+
+    let sentEmail: string | undefined;
+    const previous = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = String(typeof input === "string" ? input : input?.url ?? "");
+      if (url.includes("safeupi.com/api/order/create")) {
+        sentEmail = JSON.parse(String(init?.body ?? "{}")).customer_email;
+        return new Response(
+          JSON.stringify({
+            success: true,
+            message: "Order created successfully",
+            data: {
+              id: 1,
+              system_order_id: "AP-test",
+              merchant_order_id: "x",
+              payment: { url: "https://www.safeupi.com/api/gateway/pay?id=test" },
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      return previous(input, init);
+    }) as typeof globalThis.fetch;
+
+    const res = await request(server)
+      .post("/payments/checkout")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ orderIds: [placed.body[0].id] });
+    globalThis.fetch = previous;
+
+    expect(res.status).toBe(201);
+    // A real address or the generated placeholder — never the raw identifier.
+    expect(sentEmail).toMatch(/^[^\s@]+@[^\s@]+\.[^\s@]+$/);
+    expect(sentEmail).not.toBe(student.email);
+  });
+
   it("ignores a webhook naming a payment we have no record of", async () => {
     gatewayTruth = { status: "success", amount: "99.00" };
     const res = await postWebhook(webhookBody("success", "KLH-never-issued-this"));
