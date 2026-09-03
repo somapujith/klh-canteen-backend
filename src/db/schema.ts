@@ -112,6 +112,54 @@ export interface Order {
   seenAt: Date | null;
   lockedByAdminId: string | null;
   lockedAt: Date | null;
+  /**
+   * The payment covering this order, or null when it was placed without one
+   * (payments switched off, or before the feature existed).
+   *
+   * One payment can cover several orders: a cart spanning both kitchens splits
+   * into one order per kitchen but is paid for once, so the FK lives here
+   * rather than an orderId living on Payment.
+   */
+  paymentId: string | null;
+  /**
+   * True while the order is holding its stock but has not been paid for.
+   *
+   * Such an order is deliberately invisible: excluded from the kitchen board,
+   * from admin stats and from status transitions. Its portions ARE reserved,
+   * so nobody can buy the food out from under a student mid-payment — but it
+   * is not cooked until the webhook confirms, and if the payment window lapses
+   * it is cancelled and the stock goes back.
+   */
+  awaitingPayment: boolean;
+}
+
+/** UPI payment through VyaparGateway. See services/paymentService.ts. */
+export type PaymentStatus = "PENDING" | "SUCCESS" | "FAILED" | "EXPIRED";
+
+export interface Payment {
+  id: string;
+  /** Our reference, sent as the gateway's `client_txn_id`. Unique. */
+  clientTxnId: string;
+  /** The gateway's own id, known once create_order returns. */
+  gatewayOrderId: string | null;
+  amount: string;
+  currency: string;
+  status: PaymentStatus;
+  studentId: string | null;
+  guestSessionId: string | null;
+  upiTxnId: string | null;
+  payerVpa: string | null;
+  payerName: string | null;
+  qrCode: string | null;
+  upiString: string | null;
+  expiresAt: Date | null;
+  paidAt: Date | null;
+  failureReason: string | null;
+  /** Last accepted webhook's key. Guards against replayed deliveries. */
+  idempotencyKey: string | null;
+  webhookCount: number;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface CollectionWindow {
