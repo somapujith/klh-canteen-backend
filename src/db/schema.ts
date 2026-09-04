@@ -131,6 +131,25 @@ export interface Order {
    * it is cancelled and the stock goes back.
    */
   awaitingPayment: boolean;
+  /** The school this order was placed at. Guest orders are always "KLH". */
+  school: School;
+  /**
+   * Snapshotted platform fee amount, already included in `totalAmount` — not
+   * a live-computed percentage. See SchoolSettings.platformFeePercent: if the
+   * superadmin changes the fee % later, this order keeps showing what was
+   * actually charged at the time.
+   */
+  platformFeeAmount: string;
+}
+
+/**
+ * Superadmin-editable platform fee, one row per school. No row for a school
+ * means 0% — see schoolSettingsRepo.getPlatformFeePercent().
+ */
+export interface SchoolSettings {
+  school: School;
+  platformFeePercent: string;
+  updatedAt: Date;
 }
 
 /** UPI payment through SafeUPI. See services/paymentService.ts. */

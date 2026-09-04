@@ -3,9 +3,10 @@ import { sql, joinSql, query } from "../db/sql.js";
 import type { SqlFragment } from "../db/sql.js";
 import { withTransaction } from "../db/tx.js";
 import { WhereBuilder } from "../db/where.js";
-import type { Order, OrderItem, MenuItem, CollectionWindow, OrderStatus, Kitchen } from "../db/schema.js";
+import type { Order, OrderItem, MenuItem, CollectionWindow, OrderStatus, Kitchen, School } from "../db/schema.js";
 import { ApiError } from "../middleware/errorHandler.js";
 import { isUniqueViolationOn } from "../db/errors.js";
+import { getPlatformFeePercent } from "../db/schoolSettingsRepo.js";
 
 /**
  * Who an order belongs to. EXACTLY ONE of these two shapes, never both and
@@ -611,6 +612,8 @@ interface OrderDraft {
   kitchen: string;
   token: string;
   totalAmount: string;
+  /** Fee portion of totalAmount, snapshotted — see Order.platformFeeAmount. */
+  platformFeeAmount: string;
   lines: { id: string; menuItem: MenuItemWithCategory; qty: number }[];
 }
 
@@ -637,6 +640,7 @@ async function insertOrders(
   reservedAt: Date,
   expiresAt: Date,
   awaitingPayment: boolean,
+  school: School,
 ): Promise<Map<string, { orderNumber: number; createdAt: Date }>> {
   const itemRows = joinSql(
     drafts.flatMap((d) =>
@@ -665,7 +669,7 @@ async function insertOrders(
     const orderRows = joinSql(
       drafts.map(
         (d) =>
-          sql`(${d.id}::text, ${d.kitchen}::text, ${d.token}::text, ${randomOrderNumber()}::int, ${d.totalAmount}::text)`,
+          sql`(${d.id}::text, ${d.kitchen}::text, ${d.token}::text, ${randomOrderNumber()}::int, ${d.totalAmount}::text, ${d.platformFeeAmount}::text)`,
       ),
     );
 
@@ -677,7 +681,8 @@ async function insertOrders(
           INSERT INTO "Order" (
             "id", "studentId", "guestSessionId", "guestName", "guestPhone",
             "kitchen", "token", "orderNumber", "totalAmount",
-            "collectionAt", "reservedAt", "reservationExpiresAt", "awaitingPayment"
+            "collectionAt", "reservedAt", "reservationExpiresAt", "awaitingPayment",
+            "school", "platformFeeAmount"
           )
           SELECT v.id,
                  ${ownerData.studentId}::text,
@@ -691,8 +696,10 @@ async function insertOrders(
                  ${slot ? slot.toISOString() : null}::timestamp,
                  ${reservedAt.toISOString()}::timestamp,
                  ${expiresAt.toISOString()}::timestamp,
-                 ${awaitingPayment}::boolean
-            FROM (VALUES ${orderRows}) AS v(id, kitchen, token, num, total)
+                 ${awaitingPayment}::boolean,
+                 ${school}::"School",
+                 v.fee::numeric(10, 2)
+            FROM (VALUES ${orderRows}) AS v(id, kitchen, token, num, total, fee)
           RETURNING "id", "orderNumber", "createdAt"
         ), new_items AS (
           INSERT INTO "OrderItem" ("id", "orderId", "menuItemId", "quantity", "priceAtOrder")
@@ -795,13 +802,21 @@ export async function createOrder(
     `,
     ),
     ownerData.studentId
-      ? query<StudentSummary>(
+      ? query<StudentSummary & { school: School }>(
           pool,
-          sql`SELECT "id", "name", "rollNumber", "email" FROM "User" WHERE "id" = ${ownerData.studentId}::text LIMIT 1`,
+          sql`SELECT "id", "name", "rollNumber", "email", "school" FROM "User" WHERE "id" = ${ownerData.studentId}::text LIMIT 1`,
         )
-      : Promise.resolve({ rows: [] as StudentSummary[], rowCount: 0 }),
+      : Promise.resolve({ rows: [] as (StudentSummary & { school: School })[], rowCount: 0 }),
   ]);
   const student = studentRows[0] ?? null;
+
+  // Guest ordering is KLH-only per the existing guest-flow precedent, so a
+  // guest order's school is always "KLH". A student's school comes from their
+  // own account, not a client-supplied value.
+  const school: School = student?.school ?? "KLH";
+  // One lookup per checkout, not per kitchen-split order — the fee % is the
+  // same for every order this cart produces.
+  const platformFeePercent = await getPlatformFeePercent(pool, school);
 
   const menuItemById = new Map(menuItems.map((item) => [item.id, item]));
   const missing = menuItemIds.filter((id) => !menuItemById.has(id));
@@ -840,7 +855,12 @@ export async function createOrder(
   const drafts: OrderDraft[] = kitchens.map((kitchen) => {
     const id = crypto.randomUUID();
     const lines = byKitchen.get(kitchen)!;
-    const total = lines.reduce((sum, line) => sum + Number(line.menuItem.price) * line.qty, 0);
+    const subtotal = lines.reduce((sum, line) => sum + Number(line.menuItem.price) * line.qty, 0);
+    // Applied per kitchen-split order, not as one lump sum divided across
+    // them — avoids any cross-order rounding allocation problem and keeps
+    // each Order's own totalAmount internally consistent.
+    const feeAmount = Number((subtotal * (platformFeePercent / 100)).toFixed(2));
+    const total = subtotal + feeAmount;
     return {
       id,
       kitchen,
@@ -848,6 +868,7 @@ export async function createOrder(
       // Order.token is what it exists for. Collection is by order number.
       token: crypto.randomUUID(),
       totalAmount: total.toFixed(2),
+      platformFeeAmount: feeAmount.toFixed(2),
       lines: lines.map((line) => ({ id: crypto.randomUUID(), menuItem: line.menuItem, qty: line.qty })),
     };
   });
@@ -869,6 +890,8 @@ export async function createOrder(
     kitchen: draft.kitchen,
     orderNumber: row.orderNumber,
     totalAmount: draft.totalAmount,
+    school,
+    platformFeeAmount: draft.platformFeeAmount,
     createdAt: row.createdAt,
     collectionAt: slot,
     deliveredAt: null,
@@ -917,7 +940,7 @@ export async function createOrder(
     }
 
     // ---- statement 2: write the orders and their items -------------------
-    const written = await insertOrders(pool, drafts, ownerData, slot, reservedAt, expiresAt, awaitingPayment);
+    const written = await insertOrders(pool, drafts, ownerData, slot, reservedAt, expiresAt, awaitingPayment, school);
     wrote = true;
 
     orders = drafts.map((draft) => {
@@ -1175,13 +1198,19 @@ export async function getAllOrders(pool: Pool, options: OrderPageOptions = {}) {
   };
 }
 
-export async function getAdminStats(pool: Pool, kitchen?: string) {
+/** Midnight-to-midnight UTC window used by both getAdminStats and getSuperAdminStats. */
+function todayWindow(): { startOfDay: Date; endOfDay: Date } {
   // Using local timezone roughly by taking midnight of current UTC day
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
 
   const endOfDay = new Date(startOfDay);
   endOfDay.setHours(23, 59, 59, 999);
+  return { startOfDay, endOfDay };
+}
+
+export async function getAdminStats(pool: Pool, kitchen?: string, school?: School) {
+  const { startOfDay, endOfDay } = todayWindow();
 
   const where = new WhereBuilder();
   // ISO-UTC strings cast to `::timestamp`, not raw Date params — see the
@@ -1191,21 +1220,68 @@ export async function getAdminStats(pool: Pool, kitchen?: string) {
   // from both the count and the total until its payment confirms.
   where.and(`"awaitingPayment" = FALSE`);
   if (kitchen) where.and(`"kitchen" = $1::"Kitchen"`, kitchen);
+  // Required for correctness, not optional: "kitchen" alone (SNACKS/MEALS)
+  // does not disambiguate school, so without this an admin's "platform fee
+  // collected" stat would silently include the other school's orders too.
+  if (school) where.and(`"school" = $1::"School"`, school);
 
-  // Only the money column is needed — the previous full-row fetch dragged
+  // Only the money columns are needed — the previous full-row fetch dragged
   // every column of every order back for a sum.
-  const { rows: todaysOrders } = await query<{ totalAmount: string }>(
+  const { rows: todaysOrders } = await query<{ totalAmount: string; platformFeeAmount: string }>(
     pool,
-    sql`SELECT "totalAmount" FROM "Order" WHERE ${where.build()}`,
+    sql`SELECT "totalAmount", "platformFeeAmount" FROM "Order" WHERE ${where.build()}`,
   );
 
   const totalOrdersToday = todaysOrders.length;
   const totalRevenueToday = todaysOrders.reduce((sum, order) => sum + Number(order.totalAmount), 0);
+  const totalPlatformFeeToday = todaysOrders.reduce((sum, order) => sum + Number(order.platformFeeAmount), 0);
 
   return {
     totalOrdersToday,
     totalRevenueToday: totalRevenueToday.toFixed(2),
+    totalPlatformFeeToday: totalPlatformFeeToday.toFixed(2),
   };
+}
+
+/**
+ * Per-school breakdown for the superadmin dashboard — one row per School
+ * value, unlike getAdminStats which is scoped to a single caller's school.
+ * Same today-window and awaitingPayment-exclusion rules as getAdminStats,
+ * just grouped by school instead of filtered to one.
+ */
+export interface SuperAdminSchoolStats {
+  school: School;
+  totalOrdersToday: number;
+  totalRevenueToday: string;
+  totalPlatformFeeToday: string;
+}
+
+const ALL_SCHOOLS: School[] = ["KLH", "DRK"];
+
+export async function getSuperAdminStats(pool: Pool): Promise<SuperAdminSchoolStats[]> {
+  const { startOfDay, endOfDay } = todayWindow();
+
+  const { rows } = await query<{ school: School; totalAmount: string; platformFeeAmount: string }>(
+    pool,
+    sql`
+    SELECT "school", "totalAmount", "platformFeeAmount" FROM "Order"
+     WHERE "createdAt" >= ${startOfDay.toISOString()}::timestamp
+       AND "createdAt" <= ${endOfDay.toISOString()}::timestamp
+       AND "awaitingPayment" = FALSE
+  `,
+  );
+
+  return ALL_SCHOOLS.map((school) => {
+    const schoolOrders = rows.filter((row) => row.school === school);
+    const totalRevenueToday = schoolOrders.reduce((sum, order) => sum + Number(order.totalAmount), 0);
+    const totalPlatformFeeToday = schoolOrders.reduce((sum, order) => sum + Number(order.platformFeeAmount), 0);
+    return {
+      school,
+      totalOrdersToday: schoolOrders.length,
+      totalRevenueToday: totalRevenueToday.toFixed(2),
+      totalPlatformFeeToday: totalPlatformFeeToday.toFixed(2),
+    };
+  });
 }
 
 /**

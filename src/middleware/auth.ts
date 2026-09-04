@@ -132,6 +132,7 @@ export function requireAuthWith(options: AuthOptions = {}): MiddlewareHandler<Ap
       id: user.id,
       role: user.role,
       kitchen: user.kitchen,
+      school: user.school,
       mustChangePassword: user.mustChangePassword,
     });
     await next();

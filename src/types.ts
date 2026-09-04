@@ -1,5 +1,5 @@
 import type { Pool } from "@neondatabase/serverless";
-import type { Role } from "./db/schema.js";
+import type { Role, School } from "./db/schema.js";
 import type { SessionUser } from "./services/authService.js";
 import type { TokenPayload } from "./lib/jwt.js";
 
@@ -111,6 +111,7 @@ export interface AuthUser {
   id: string;
   role: Role;
   kitchen?: string | null;
+  school: School;
   /**
    * Mirrors User.mustChangePassword as of THIS request, read from the database
    * rather than from the token — a flag baked into a 12-hour JWT would keep

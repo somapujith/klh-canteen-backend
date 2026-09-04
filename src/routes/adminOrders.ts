@@ -115,7 +115,7 @@ adminOrdersRouter.get("/", requireAuth("ADMIN"), async (c) => {
 adminOrdersRouter.get("/stats", requireAuth("ADMIN"), async (c) => {
   const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const stats = await getAdminStats(pool, user.kitchen || undefined);
+  const stats = await getAdminStats(pool, user.kitchen || undefined, user.school);
   return c.json(stats);
 });
 

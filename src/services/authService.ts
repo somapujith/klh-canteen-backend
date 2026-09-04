@@ -24,6 +24,7 @@ export type SessionUser = {
   id: string;
   role: Role;
   kitchen: string | null;
+  school: School;
   name: string;
   email: string;
   rollNumber: string | null;
@@ -47,6 +48,7 @@ export async function loadSessionUser(pool: Pool, userId: string): Promise<Sessi
     id: user.id,
     role: user.role,
     kitchen: user.kitchen,
+    school: user.school,
     name: user.name,
     email: user.email,
     rollNumber: user.rollNumber,

@@ -16,10 +16,13 @@ import { superAdminUsersRouter } from "./routes/superadminUsers.js";
 import { superAdminStudentsRouter } from "./routes/superadminStudents.js";
 import { superAdminCohortsRouter } from "./routes/superadminCohorts.js";
 import { superAdminExportsRouter } from "./routes/superadminExports.js";
+import { superAdminSettingsRouter } from "./routes/superadminSettings.js";
 import { telegramRouter } from "./routes/telegram.js";
 import { paymentsRouter } from "./routes/payments.js";
 import { paymentsEnabled } from "./services/paymentService.js";
-import { getBindings } from "./lib/context.js";
+import { getPlatformFeePercent } from "./db/schoolSettingsRepo.js";
+import { getBindings, getRequestPool } from "./lib/context.js";
+import type { School } from "./db/schema.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { rateLimit } from "./middleware/rateLimit.js";
 import type { AppEnv } from "./types.js";
@@ -109,9 +112,15 @@ export function createApp() {
   // payments-disabled deploy would 503 only after the order was already
   // placed. Nothing secret is exposed: this reports THAT payments are on,
   // never the credentials that make them work.
-  app.get("/config", (c) => {
+  app.get("/config", async (c) => {
     const bindings = getBindings(c);
-    return c.json({ paymentsEnabled: paymentsEnabled(bindings) });
+    // Default "KLH" so existing callers that never passed `school` keep
+    // getting exactly what they got before this param existed.
+    const rawSchool = c.req.query("school");
+    const school: School = rawSchool === "DRK" ? "DRK" : "KLH";
+    const pool = getRequestPool(c);
+    const platformFeePercent = await getPlatformFeePercent(pool, school);
+    return c.json({ paymentsEnabled: paymentsEnabled(bindings), platformFeePercent });
   });
 
   app.route("/auth", authRouter);
@@ -130,6 +139,7 @@ export function createApp() {
   // Year-end cohort promotion (dry-run by default) and reconciliation exports.
   app.route("/superadmin/cohorts", superAdminCohortsRouter);
   app.route("/superadmin/exports", superAdminExportsRouter);
+  app.route("/superadmin/settings", superAdminSettingsRouter);
   // Student Telegram link + bot webhook (students only; staff/guest never linked).
   app.route("/telegram", telegramRouter);
   // UPI payments. POST /payments/webhook is public and authenticated by HMAC
