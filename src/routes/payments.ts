@@ -284,11 +284,19 @@ paymentsRouter.get("/:id", optionalStudentAuth, statusLimiter, async (c) => {
   if (!payment) throw new ApiError(404, "NOT_FOUND", "Payment not found");
 
   if (payment.status === "PENDING" && paymentsEnabled(bindings)) {
-    // Past its window and still undecided: close it out rather than asking the
-    // gateway about a QR nobody can scan any more.
-    if (payment.expiresAt && payment.expiresAt.getTime() < Date.now()) {
-      await expireStalePayments(pool);
-    } else if (Date.now() - payment.updatedAt.getTime() >= RECONCILE_MIN_INTERVAL_MS) {
+    // A gateway check ALWAYS comes before force-expiring, never instead of
+    // it. SafeUPI documents no expiry for its own hosted page, so a student
+    // who wanders off and finishes paying hours after OUR window closed is
+    // real and observed, not hypothetical — and the previous ordering
+    // (expire-without-asking once past the window) would have permanently
+    // discarded a payment that had, by then, actually succeeded: the
+    // terminal-state guard in applyWebhook refuses to un-expire it once
+    // that happens. So a past-due payment gets exactly the same live
+    // reconcile as one still inside its window; only a payment that is BOTH
+    // past due AND still undecided after that check falls through to the
+    // expiry sweep.
+    const pastDue = Boolean(payment.expiresAt && payment.expiresAt.getTime() < Date.now());
+    if (Date.now() - payment.updatedAt.getTime() >= RECONCILE_MIN_INTERVAL_MS) {
       // Throttled to one live gateway call per interval, not one per poll.
       // The frontend polls every 2s and a slow settlement can run for minutes
       // — unthrottled, that is roughly 250+ calls to SafeUPI asking the same
@@ -306,6 +314,11 @@ paymentsRouter.get("/:id", optionalStudentAuth, statusLimiter, async (c) => {
       }
     }
     payment = (await getPaymentForOwner(pool, paymentId, owner)) ?? payment;
+
+    if (payment.status === "PENDING" && pastDue) {
+      await expireStalePayments(pool);
+      payment = (await getPaymentForOwner(pool, paymentId, owner)) ?? payment;
+    }
   }
 
   return c.json(serializePayment(payment, payment.status === "PENDING"));
