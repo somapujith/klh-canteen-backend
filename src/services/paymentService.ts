@@ -391,6 +391,15 @@ export interface InitiatedPayment {
   qrCode: string | null;
   linkedMerchantId: string | null;
   merchantUpiHash: string | null;
+  /**
+   * SafeUPI's Embedded JS Checkout — a modal opened client-side via their
+   * SDK instead of a full-page redirect to `paymentUrl`. `null` when SafeUPI
+   * doesn't return one for this business, mirroring `qrCode`'s optionality.
+   * Not persisted to the Payment row: it's short-lived and single-use, and
+   * nothing re-reads it after this response the way `paymentUrl` isn't
+   * re-derived either.
+   */
+  checkout: { token: string; sdkUrl: string; expiresAt: string } | null;
 }
 
 /**
@@ -576,6 +585,14 @@ export async function initiatePayment(
     qrCode: data.payment?.qr_code ?? null,
     linkedMerchantId,
     merchantUpiHash: data.merchant_upi_id ?? null,
+    checkout:
+      data.payment?.checkout?.token && data.payment.checkout.sdk_url
+        ? {
+            token: data.payment.checkout.token,
+            sdkUrl: data.payment.checkout.sdk_url,
+            expiresAt: data.payment.checkout.expires_at ?? expiresAt.toISOString(),
+          }
+        : null,
   };
 }
 

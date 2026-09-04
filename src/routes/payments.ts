@@ -235,6 +235,9 @@ paymentsRouter.post("/checkout", optionalStudentAuth, checkoutLimiter, async (c)
       // for a desktop user who would rather scan than be redirected; the hosted
       // page renders its own QR either way.
       qrCode: payment.qrCode,
+      // Drives the Embedded JS Checkout modal. `paymentUrl` above stays in
+      // the response as the fallback if the SDK script fails to load.
+      checkout: payment.checkout,
       orderIds,
     },
     201,
