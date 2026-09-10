@@ -1,4 +1,4 @@
-# UPI Payments (SafeUPI)
+# UPI Payments (GuruPay)
 
 Online payment for canteen orders, behind a feature flag that is **off by
 default**. With it off, ordering behaves exactly as it did before payments
@@ -19,14 +19,14 @@ createOrder(awaitingPayment: true)      ← stock is CLAIMED here
 POST /payments/checkout                 ← amount summed from the order rows,
       │                                   never taken from the client
       ▼
-SafeUPI order/create → payment.url
+GuruPay create-order → payment_url
       │
       ▼
-browser redirected to SafeUPI's hosted page
+browser redirected to GuruPay's hosted page
       │
-      ├── student pays ──► webhook "success"
-      │                      ├─ compare the shared secret
-      │                      ├─ ASK SafeUPI's Status API what really happened
+      ├── student pays ──► webhook "payment.success"  (UNSIGNED — trusted for
+      │                      │                          nothing but the order_id)
+      │                      ├─ ASK GuruPay's check-status API what really happened
       │                      ├─ check amount matches to the paisa
       │                      └─ awaitingPayment = FALSE → kitchen sees it
       │
@@ -35,61 +35,62 @@ browser redirected to SafeUPI's hosted page
 ```
 
 An order with `awaitingPayment = TRUE` holds its stock but is invisible to the
-kitchen, to admin stats, and to status transitions. It becomes real only when a
-**verified** webhook confirms the money.
+kitchen, to admin stats, and to status transitions. It becomes real only when
+`applyWebhook` independently confirms the money against GuruPay's own records.
 
 ## The trust model, and why there is an extra call
 
-SafeUPI does **not sign its webhooks**. It echoes a shared secret in the request
-body and expects the receiver to compare it. That is a bearer check: it proves
-the sender knew the secret, and nothing about whether the payload is true.
-Anything that ever sees one delivery — a log line, a proxy, a misrouted
-request — learns the secret and can then forge a `success` for any order.
+GuruPay **signs nothing**. There is no shared secret, no HMAC header, no way
+at all to tell a genuine delivery from a POST anyone could send by hand to
+`/payments/webhook` with a guessed or observed `order_id`.
 
-So a webhook is treated as **a hint that something happened**, never as proof
-that it did. Before any order is released, `applyWebhook` calls SafeUPI's Status
-API and uses *that* answer, discarding whatever the payload claimed. Forging a
-delivery is therefore not enough; an attacker would also have to fool SafeUPI.
+So a webhook here is never trusted with a decision. The payload is used for
+exactly one thing — looking up which `Payment` it claims to be about — and
+never to decide that payment's outcome. Before any order is released,
+`applyWebhook` calls GuruPay's check-status API and uses *that* answer,
+discarding whatever the payload claimed outright. A forged or replayed
+delivery therefore accomplishes nothing on its own; an attacker would also
+have to make GuruPay's own records say "success".
 
-`Payment.verifiedViaStatusApi` records that the second check actually ran, so a
-settlement made on a webhook alone would be visible rather than silent.
+`Payment.verifiedViaStatusApi` records that the check-status call actually
+ran, so a settlement made on the payload alone — which should never happen —
+would be visible rather than silent.
 
 ## Configuration
 
-Both the flag **and** the credentials are required, or payments read as off — a
+Both the flag **and** the credential are required, or payments read as off — a
 flag-only deploy presents no checkout rather than one that cannot settle.
 
 | Name | Where | What |
 |---|---|---|
 | `PAYMENTS_ENABLED` | `wrangler.jsonc` vars | `"true"` to enable |
-| `SAFEUPI_API_SECRET` | **secret** | API key, sent as `secret` in each body |
-| `SAFEUPI_WEBHOOK_SECRET` | **secret** | the value SafeUPI echoes back |
-| `SAFEUPI_REDIRECT_URL` | `wrangler.jsonc` vars | where the browser returns |
-| `SAFEUPI_MERCHANT_ID` | optional | route to a specific merchant |
+| `GURUPAY_API_KEY` | **secret** | merchant API key, sent as the `X-Guru-Key` header |
+| `GURUPAY_REDIRECT_URL` | `wrangler.jsonc` vars | where the browser returns |
 
 ```bash
-npx wrangler secret put SAFEUPI_API_SECRET
-npx wrangler secret put SAFEUPI_WEBHOOK_SECRET
+npx wrangler secret put GURUPAY_API_KEY
 ```
 
-Both are bearer credentials that travel in request bodies, which is why nothing
-in `paymentService.ts` ever logs a request body — only responses.
+The API key travels in a header rather than a request body — a meaningfully
+better place for a credential than the previous gateway's body-field scheme,
+since bodies are what get logged and echoed back in error reports. Even so,
+nothing in `paymentService.ts` logs a request body, only responses.
 
 ## The webhook URL
 
-SafeUPI asks for an HTTPS URL that accepts POST. That endpoint already exists:
+GuruPay asks for an HTTPS URL that accepts POST. That endpoint already exists:
 
 ```
 https://<your-worker>.workers.dev/payments/webhook
 ```
 
 It is an API route, not a page. It must be reachable from the public internet —
-SafeUPI's servers call it, not the browser — so `localhost` cannot work. For
+GuruPay's servers call it, not the browser — so `localhost` cannot work. For
 local development, tunnel:
 
 ```bash
 cloudflared tunnel --url http://localhost:4000
-# paste the printed https URL + /payments/webhook into SafeUPI's dashboard
+# paste the printed https URL + /payments/webhook into GuruPay's dashboard
 ```
 
 The redirect URL is separate and points at the **frontend**:
@@ -104,8 +105,7 @@ The payment id is appended automatically at create time.
 
 | Risk | Defence |
 |---|---|
-| Forged webhook | Shared secret compared in constant time, **then** confirmed against the Status API |
-| Leaked webhook secret | Still not enough — the Status API must also agree |
+| Forged or replayed webhook | The payload decides nothing by itself — every outcome is confirmed against check-status |
 | Replayed delivery | Idempotency key derived from outcome + UTR, plus a terminal-status check under `FOR UPDATE` |
 | Tampered amount | The **gateway's** amount compared to the stored amount in paise |
 | Client-set price | Amount summed server-side from the order rows; the client never sends one |
@@ -118,9 +118,9 @@ The payment id is appended automatically at create time.
 
 ## Testing without a live merchant
 
-`order/create` is the only call that needs a connected SafeUPI merchant.
+`create-order` is the only call that needs a connected GuruPay merchant.
 Everything after the money moves is ours and is tested offline in
-`tests/paymentSettlement.test.ts`, which stubs the Status API so both sides —
+`tests/paymentSettlement.test.ts`, which stubs `check-status` so both sides —
 the delivery and the gateway's answer — can be controlled independently.
 
 ```bash
@@ -131,22 +131,29 @@ npm run test:db:down
 
 Cases include: an unpaid order stays hidden while holding stock; a confirmed
 webhook releases it; a replay is a no-op; an amount mismatch is refused; a
-failure returns the stock; a late failure does not un-confirm a success; a wrong
-secret changes nothing; **a well-formed webhook the gateway disagrees with
-releases nothing**; and an unreachable gateway releases nothing.
+failure returns the stock; a late failure does not un-confirm a success; **a
+well-formed webhook the gateway disagrees with releases nothing**; and an
+unreachable gateway releases nothing.
 
 ## Rollout
 
 1. Deploy with `PAYMENTS_ENABLED: "false"` — nothing changes for anyone.
 2. Run the migrations: `npm run migrate:deploy`.
-3. Set both secrets.
-4. Point SafeUPI's webhook at `/payments/webhook` and its redirect at the
+3. Set the secret (`GURUPAY_API_KEY`).
+4. Point GuruPay's webhook at `/payments/webhook` and its redirect at the
    frontend's `/payment/complete`.
 5. Flip `PAYMENTS_ENABLED` to `"true"` and redeploy.
 6. Test with a real ₹1 order before opening it to students.
 
 To roll back, set the flag to `"false"` and redeploy. The columns stay; orders
 placed while it was on keep their payment history.
+
+**Migrating from a prior gateway**: `PAYMENTS_ENABLED` staying `"true"` across
+a gateway swap means checkout goes dark the instant the old secret stops being
+read by the new code, until the new one is set — a safe failure (checkout
+503s, ordering-without-payment still works if the flag itself is flipped off),
+but not a silent one. Set the new secret *before* or *during* the same deploy
+that ships the code, not after.
 
 ## A note on `RETURNING`
 

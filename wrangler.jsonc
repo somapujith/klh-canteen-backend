@@ -28,23 +28,30 @@
     "GOOGLE_CLIENT_ID_GUEST": "507951128349-7i31je511nega9ruvngftgvpa58rav4c.apps.googleusercontent.com",
     // UPI payments master switch. "false" leaves ordering exactly as it was
     // before payments existed; "true" makes checkout require payment. Flip it
-    // only after the SAFEUPI_* secrets below are set — paymentsEnabled()
-    // requires both the flag and the credentials, so a flag-only deploy
-    // presents no checkout rather than one that cannot settle.
+    // only after GURUPAY_API_KEY below is set — paymentsEnabled() requires
+    // both the flag and the credential, so a flag-only deploy presents no
+    // checkout rather than one that cannot settle.
+    //
+    // IMPORTANT — GATEWAY SWAP IN PROGRESS: this was "true" under SafeUPI.
+    // The moment this deploys, GURUPAY_API_KEY must already be set via
+    // `wrangler secret put` (the old SAFEUPI_* secrets are not read by this
+    // code any more), or paymentsEnabled() reads as off and checkout 503s —
+    // a safe failure, but payments go dark until the new key is in place.
+    // Test with a real ₹1 order before trusting it.
     "PAYMENTS_ENABLED": "true",
-    // Where SafeUPI returns the student's browser after the hosted payment
+    // Where GuruPay returns the student's browser after the hosted payment
     // page. A public frontend URL, so it belongs in vars rather than a secret.
     // The payment id is appended as a query parameter at create time.
     //
-    // This is the DEPLOYED frontend, not a dev server: SafeUPI redirects a real
-    // browser here from its own origin, so a localhost value would strand every
-    // student on a page their phone cannot reach. Local development overrides it
-    // through .env instead of editing this file.
+    // This is the DEPLOYED frontend, not a dev server: GuruPay redirects a
+    // real browser here from its own origin, so a localhost value would
+    // strand every student on a page their phone cannot reach. Local
+    // development overrides it through .env instead of editing this file.
     // www, not the bare domain: rajasbakery.in 308-redirects to www, and an
     // extra hop through a UPI app's in-app browser is where a query string
     // goes missing — which would strip the ?payment= id the completion page
     // needs to know which payment to confirm.
-    "SAFEUPI_REDIRECT_URL": "https://www.rajasbakery.in/payment/complete"
+    "GURUPAY_REDIRECT_URL": "https://www.rajasbakery.in/payment/complete"
   },
 
   // Sensitive values are NOT set here. Before first deploy, run:
@@ -54,15 +61,14 @@
   //   wrangler secret put TELEGRAM_BOT_TOKEN
   //   wrangler secret put TELEGRAM_BOT_USERNAME
   //   wrangler secret put TELEGRAM_WEBHOOK_SECRET
-  //   wrangler secret put SAFEUPI_API_SECRET
-  //   wrangler secret put SAFEUPI_WEBHOOK_SECRET
+  //   wrangler secret put GURUPAY_API_KEY
   // These populate env.* at runtime without ever being committed to source control.
   //
-  // SAFEUPI_WEBHOOK_SECRET is NOT a signing key — SafeUPI does not sign its
-  // webhooks, it echoes this value back in the request body. That makes it a
-  // bearer credential: anything that ever logs a webhook body leaks it. It
-  // belongs nowhere but a secret, and every settlement is additionally
-  // confirmed against SafeUPI's Status API before food is released.
+  // GuruPay signs nothing — its webhook carries no secret or signature of any
+  // kind, unlike SafeUPI's old shared-secret-in-body scheme. So there is no
+  // GURUPAY_WEBHOOK_SECRET to set: the webhook payload is trusted for nothing
+  // beyond which payment to look up, and every settlement is decided solely
+  // by calling GuruPay's own check-status API before food is released.
 
   // Retained only for any non-rate-limit use. Rate limit counters moved off
   // KV to the RATE_LIMITER_HUB Durable Object below: KV's get-then-put is not

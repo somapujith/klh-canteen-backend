@@ -152,14 +152,16 @@ export interface SchoolSettings {
   updatedAt: Date;
 }
 
-/** UPI payment through SafeUPI. See services/paymentService.ts. */
+/** UPI payment through GuruPay. See services/paymentService.ts. */
 export type PaymentStatus = "PENDING" | "SUCCESS" | "FAILED" | "EXPIRED";
 
 export interface Payment {
   id: string;
-  /** Our reference, sent as SafeUPI's `merchant_order_id`. Unique. */
+  /** Our reference, sent as GuruPay's `order_id` on every call. Unique. */
   clientTxnId: string;
-  /** SafeUPI's `system_order_id`, known once order/create returns. */
+  /** GuruPay's `gateway_txn_id`, known once check-status reports a decided
+   *  outcome — null until then (GuruPay's create-order response carries no
+   *  separate gateway-side order id, only `token`, which is not persisted). */
   gatewayOrderId: string | null;
   amount: string;
   currency: string;
@@ -169,22 +171,17 @@ export interface Payment {
   upiTxnId: string | null;
   payerVpa: string | null;
   payerName: string | null;
-  qrCode: string | null;
-  upiString: string | null;
   expiresAt: Date | null;
   paidAt: Date | null;
   failureReason: string | null;
-  /** SafeUPI's hosted checkout page, where the student is sent to pay. */
+  /** GuruPay's hosted checkout page, where the student is sent to pay. */
   paymentUrl: string | null;
-  /** The connected merchant SafeUPI routed this payment to, after fallback. */
-  linkedMerchantId: string | null;
-  /** sha256 of that merchant's UPI ID, as SafeUPI returns it. */
-  merchantUpiHash: string | null;
-  /** Whether the outcome was confirmed against SafeUPI's Status API rather
-   *  than believed from the unsigned webhook alone. */
+  /** Whether the outcome was confirmed against GuruPay's check-status API
+   *  rather than trusted from the webhook signature alone. */
   verifiedViaStatusApi: boolean;
-  /** Derived per settled transaction (outcome + UTR), since SafeUPI sends no
-   *  idempotency key of its own. Guards against replayed deliveries. */
+  /** Derived per settled transaction (outcome + UTR), since GuruPay's
+   *  webhook carries no idempotency key of its own. Guards against replayed
+   *  deliveries. */
   idempotencyKey: string | null;
   webhookCount: number;
   createdAt: Date;

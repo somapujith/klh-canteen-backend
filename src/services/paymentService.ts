@@ -8,7 +8,7 @@ import type { Bindings } from "../types.js";
 type RawRunner = Pick<Pool | PoolClient, "query">;
 
 /**
- * UPI payments through SafeUPI.
+ * UPI payments through GuruPay.
  *
  * Callers: routes/payments.ts (checkout, status poll, webhook).
  * Shape: one Payment covers a whole cart, which createOrder may have split
@@ -16,35 +16,35 @@ type RawRunner = Pick<Pool | PoolClient, "query">;
  * out to every order carrying this paymentId.
  *
  * Nothing here trusts the client for money. The amount charged is recomputed
- * from the orders we wrote, and the amount SafeUPI reports is checked against
+ * from the orders we wrote, and the amount GuruPay reports is checked against
  * it again before a single order is released.
  *
- * THE TRUST MODEL IS WEAKER THAN IT LOOKS, and the code is shaped around that.
- * SafeUPI's webhook is not signed: it echoes a shared secret back in the
- * request body. Anything that ever sees one delivery — a log, a proxy, a
- * misconfigured egress — learns the secret and can then forge a "success".
- * So a webhook is treated as a HINT THAT SOMETHING HAPPENED, never as proof
- * that it did: every settlement is independently confirmed by calling
- * SafeUPI's own Status API before any food is released. Forging a delivery
- * therefore is not enough; an attacker would also have to fool SafeUPI.
+ * GuruPay does not sign its webhooks at all — there is no shared secret, no
+ * header to check, nothing that distinguishes a genuine delivery from a POST
+ * anyone could send by hand. So a webhook here is treated as pure noise: a
+ * HINT that something MIGHT have happened, and nothing more. Every
+ * settlement that releases food is decided ONLY by independently calling
+ * GuruPay's own check-status endpoint — the payload is used solely to look
+ * up which payment to ask about, never to decide its outcome. Forging a
+ * delivery therefore accomplishes nothing on its own; an attacker would also
+ * have to make GuruPay's own records say "success".
  */
 
-const GATEWAY_BASE_URL = "https://www.safeupi.com";
+const GATEWAY_BASE_URL = "https://www.gurupaygateway.com/api";
 
 /**
  * How long a payment is held open before it is closed out as expired.
  *
- * SafeUPI does not document a checkout expiry for the hosted page the way the
- * previous gateway did, so this is our own bound rather than a mirror of
- * theirs. Fifteen minutes is chosen to be comfortably longer than a student
- * fumbling with a UPI PIN, while still returning the food to the counter the
- * same lunch hour if they wander off.
+ * GuruPay does not document a checkout expiry for its hosted page, so this is
+ * our own bound rather than a mirror of theirs. Fifteen minutes is chosen to
+ * be comfortably longer than a student fumbling with a UPI PIN, while still
+ * returning the food to the counter the same lunch hour if they wander off.
  */
 export const PAYMENT_WINDOW_MS = 15 * 60 * 1000;
 
-/** Rupee bounds. SafeUPI documents only "a positive number", so these are our
- *  own sanity rails: a zero-rupee order is a bug, and a five-figure canteen
- *  bill is far more likely to be one than a real lunch. */
+/** Rupee bounds. GuruPay documents only "amount > 0.00", so these are our own
+ *  sanity rails: a zero-rupee order is a bug, and a five-figure canteen bill
+ *  is far more likely to be one than a real lunch. */
 const MIN_AMOUNT = 1;
 const MAX_AMOUNT = 100_000;
 
@@ -62,18 +62,12 @@ export interface PaymentRow {
   upiTxnId: string | null;
   payerVpa: string | null;
   payerName: string | null;
-  qrCode: string | null;
-  upiString: string | null;
-  /** SafeUPI's hosted checkout page — where the student is sent to pay. */
+  /** GuruPay's hosted checkout page — where the student is sent to pay. */
   paymentUrl: string | null;
-  /** The connected merchant SafeUPI routed this payment to, after fallback. */
-  linkedMerchantId: string | null;
-  /** sha256 of that merchant's UPI ID, as SafeUPI returns it. */
-  merchantUpiHash: string | null;
   /**
-   * Whether this payment's outcome was confirmed against SafeUPI's Status API
-   * rather than believed from the webhook alone. Recorded because the webhook
-   * is unsigned, so "we checked" is a fact worth being able to audit.
+   * Whether this payment's outcome was confirmed against GuruPay's
+   * check-status API rather than believed from the webhook signature alone.
+   * Recorded so "we checked" is a fact worth being able to audit.
    */
   verifiedViaStatusApi: boolean;
   expiresAt: Date | null;
@@ -90,173 +84,74 @@ export interface PaymentRow {
 // ---------------------------------------------------------------------------
 
 export interface PaymentConfig {
-  /** SafeUPI's `secret` — the API key sent in every request body. */
-  apiSecret: string;
-  /** The value SafeUPI echoes in a webhook body. Not a signing key. */
-  webhookSecret: string;
-  /** Where SafeUPI returns the student's browser after the hosted page. */
+  /** GuruPay's merchant API key, sent as the `X-Guru-Key` header. */
+  apiKey: string;
+  /** Where GuruPay returns the student's browser after the hosted page. */
   redirectUrl: string;
-  /** Optional merchant to route to; SafeUPI picks a default when absent. */
-  merchantId?: string;
 }
 
 /**
  * True only when payments are switched on AND fully configured.
  *
- * Deliberately two conditions: a half-configured deploy (flag on, secret
+ * Deliberately two conditions: a half-configured deploy (flag on, key
  * missing) must not present a checkout that cannot settle. It reads as "off"
  * instead, which is the safe direction — ordering still works.
  */
 export function paymentsEnabled(bindings: Bindings): boolean {
   if (String(bindings.PAYMENTS_ENABLED ?? "").toLowerCase() !== "true") return false;
-  return Boolean(bindings.SAFEUPI_API_SECRET && bindings.SAFEUPI_REDIRECT_URL);
+  return Boolean(bindings.GURUPAY_API_KEY && bindings.GURUPAY_REDIRECT_URL);
 }
 
 /**
  * Config or a hard failure. Called only behind paymentsEnabled(), so a throw
- * here means the flag was flipped on without the secrets — worth a 503 that
- * names the cause rather than a confusing gateway error later.
- *
- * SAFEUPI_WEBHOOK_SECRET is required too, and deliberately so. It is the only
- * thing standing between a stranger's POST and a confirmed order, and an empty
- * expected secret would compare equal to an empty supplied one — turning the
- * check into a no-op precisely when it matters most.
+ * here means the flag was flipped on without the key — worth a 503 that names
+ * the cause rather than a confusing gateway error later.
  */
 export function getPaymentConfig(bindings: Bindings): PaymentConfig {
-  const apiSecret = bindings.SAFEUPI_API_SECRET;
-  const webhookSecret = bindings.SAFEUPI_WEBHOOK_SECRET;
-  const redirectUrl = bindings.SAFEUPI_REDIRECT_URL;
+  const apiKey = bindings.GURUPAY_API_KEY;
+  const redirectUrl = bindings.GURUPAY_REDIRECT_URL;
 
-  if (!apiSecret || !webhookSecret || !redirectUrl) {
+  if (!apiKey || !redirectUrl) {
     throw new ApiError(
       503,
       "PAYMENTS_UNCONFIGURED",
-      "Payments are not configured. Set SAFEUPI_API_SECRET, SAFEUPI_WEBHOOK_SECRET and SAFEUPI_REDIRECT_URL.",
+      "Payments are not configured. Set GURUPAY_API_KEY and GURUPAY_REDIRECT_URL.",
     );
   }
-  return {
-    apiSecret,
-    webhookSecret,
-    redirectUrl,
-    merchantId: bindings.SAFEUPI_MERCHANT_ID,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Webhook authentication
-// ---------------------------------------------------------------------------
-
-/**
- * Constant-time compare of two strings.
- *
- * Node's crypto.timingSafeEqual is not available on workerd, so the compare is
- * written out: fixed-length accumulate, no early return. The length check is
- * folded into the result rather than short-circuiting, so a wrong-length
- * secret costs the same as a wrong-value one.
- *
- * This matters more here than it did under the previous gateway. SafeUPI's
- * webhook carries the shared secret itself rather than a signature over the
- * payload, so a naive `===` would leak that secret's prefix through response
- * timing — one character at a time, to anyone who can POST repeatedly.
- */
-function timingSafeEqual(a: string, b: string): boolean {
-  const equalLength = a.length === b.length;
-  // Compare against itself on mismatch so loop cost never depends on b.
-  const rhs = equalLength ? b : a;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ rhs.charCodeAt(i);
-  }
-  return diff === 0 && equalLength;
-}
-
-export interface WebhookVerification {
-  ok: boolean;
-  reason?: string;
-}
-
-/**
- * Authenticates a SafeUPI webhook.
- *
- * SafeUPI does not sign its webhooks. It puts a shared secret in the request
- * body and expects the receiver to compare it, so this is a bearer check
- * rather than a proof of integrity: it establishes that the sender knows the
- * secret, and NOTHING about whether the payload was tampered with in flight or
- * even relates to a real payment.
- *
- * That is why this function is not the last word. applyWebhook re-checks the
- * outcome against SafeUPI's Status API before releasing anything, so passing
- * this check buys a caller the right to be listened to, not the right to be
- * believed. See the note at the top of this module.
- *
- * An absent configured secret is refused rather than treated as "no check
- * required" — otherwise a misconfigured deploy would accept every POST.
- */
-export function verifyWebhook(
-  configuredSecret: string,
-  suppliedSecret: unknown,
-): WebhookVerification {
-  if (!configuredSecret) return { ok: false, reason: "no webhook secret configured" };
-  if (typeof suppliedSecret !== "string" || suppliedSecret.length === 0) {
-    return { ok: false, reason: "missing secret in payload" };
-  }
-  if (!timingSafeEqual(suppliedSecret, configuredSecret)) {
-    return { ok: false, reason: "secret mismatch" };
-  }
-  return { ok: true };
+  return { apiKey, redirectUrl };
 }
 
 // ---------------------------------------------------------------------------
 // Gateway client
 // ---------------------------------------------------------------------------
 
-/**
- * SafeUPI's response envelope: `{ success, message, data }`, with `key` added
- * on some errors as a machine-readable reason (e.g. "duplicate_order_id").
- */
+/** GuruPay's response envelope: `{ status, data }`, with `message` on errors. */
 interface GatewayEnvelope<T> {
-  success: boolean;
+  status: string;
   message?: string;
-  key?: string;
   data?: T;
 }
 
-/** The human-readable reason, whichever field carries it. */
-function gatewayMessage<T>(parsed: GatewayEnvelope<T>): string | undefined {
-  return parsed.message || parsed.key || undefined;
-}
-
-/** POST /api/order/create */
+/** POST /api/create-order */
 interface CreateOrderData {
-  id: number;
-  system_order_id: string;
-  merchant_order_id: string;
-  linked_merchant_id?: number | string | null;
-  merchant_upi_id?: string;
-  merchant_type?: string;
-  payment?: {
-    url?: string;
-    checkout?: { token?: string; sdk_url?: string; expires_at?: string };
-    paylinks?: Record<string, Record<string, { icon?: string; link?: string }>>;
-    /** Only returned for selected businesses, so never relied on. */
-    qr_code?: string;
-  };
+  payment_url: string;
+  order_id: string;
+  token: string;
+  amount: number | string;
+  currency: string;
 }
 
-/** POST /api/order/status */
+/** POST /api/check-status */
 interface CheckStatusData {
-  id: number;
-  system_order_id: string;
-  merchant_order_id: string;
-  status: string;
-  amount: string | number;
-  merchant_info?: { name?: string; upi_id?: string };
-  created_at?: number;
-  payment?: {
-    transaction_at?: number | string | null;
-    utr?: string | null;
-    customer_vpa?: string | null;
-  };
+  order_id: string;
+  amount: number | string;
+  currency: string;
+  payment_status: string;
+  utr: string | null;
+  payment_method?: string;
+  provider?: string;
+  gateway_txn_id?: string | null;
+  paid_at?: string | null;
 }
 
 /** Capped well under the payment window: a hung connection must not hold a
@@ -264,13 +159,13 @@ interface CheckStatusData {
 const GATEWAY_TIMEOUT_MS = 15_000;
 
 /**
- * One SafeUPI call.
+ * One GuruPay call.
  *
- * The API key rides in the JSON body as `secret`, which is SafeUPI's documented
- * scheme and not a choice available to us — there is no header form. It is a
- * meaningfully worse place for a credential than a header (bodies are what get
- * logged and echoed back in error reports), so nothing in this module ever logs
- * a request body, and the error paths below log only the response.
+ * The API key rides in the `X-Guru-Key` header, GuruPay's documented scheme —
+ * a meaningfully better place for a credential than SafeUPI's body field was
+ * (bodies are what get logged and echoed back in error reports). Even so,
+ * nothing in this module logs a request body, only responses, since there is
+ * no benefit to loosening that discipline now.
  */
 async function callGateway<T>(
   config: PaymentConfig,
@@ -281,8 +176,12 @@ async function callGateway<T>(
   try {
     response = await fetch(`${GATEWAY_BASE_URL}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({ secret: config.apiSecret, ...body }),
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-Guru-Key": config.apiKey,
+      },
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(GATEWAY_TIMEOUT_MS),
     });
   } catch (err) {
@@ -305,28 +204,15 @@ async function callGateway<T>(
     throw new ApiError(502, "PAYMENT_GATEWAY_ERROR", "The payment gateway returned an unreadable response.");
   }
 
-  // SafeUPI signals failure with `success: false` and may still answer HTTP
-  // 200, so the envelope is authoritative rather than the status code.
-  if (!response.ok || !parsed.success) {
-    const reason = gatewayMessage(parsed);
-    console.error("[payments] gateway rejected request", path, response.status, reason ?? "(no reason given)");
-
-    // A reused merchant_order_id is our bug, not the student's, and retrying
-    // the same id will never succeed — worth its own code so it is greppable
-    // rather than buried in the generic upstream failure.
-    if (parsed.key === "duplicate_order_id") {
-      throw new ApiError(
-        500,
-        "PAYMENT_DUPLICATE_ORDER_ID",
-        "Could not start the payment. Please try again.",
-      );
-    }
-
+  // GuruPay signals failure with a non-"success" status and may still answer
+  // HTTP 200, so the envelope is authoritative rather than the status code.
+  if (!response.ok || parsed.status !== "success") {
+    console.error("[payments] gateway rejected request", path, response.status, parsed.message ?? "(no reason given)");
     const status = response.status === 429 ? 429 : 502;
     throw new ApiError(
       status,
       "PAYMENT_GATEWAY_REJECTED",
-      reason ?? "The payment gateway rejected the request.",
+      parsed.message ?? "The payment gateway rejected the request.",
     );
   }
   return parsed;
@@ -350,8 +236,8 @@ function assertChargeable(amount: number): void {
 
 /**
  * Our transaction reference. Random rather than derived from the payment id,
- * so a retry after a failed create_order gets a fresh reference — the gateway
- * treats client_txn_id as unique and would reject the reuse.
+ * so a retry after a failed create-order gets a fresh reference — GuruPay
+ * treats order_id as unique and would reject the reuse.
  */
 function newClientTxnId(): string {
   const bytes = new Uint8Array(9);
@@ -366,40 +252,20 @@ export interface PaymentOwner {
   guestSessionId?: string;
   customerName?: string;
   customerMobile?: string;
-  customerEmail?: string;
 }
 
 export interface InitiatedPayment {
   paymentId: string;
   clientTxnId: string;
-  gatewayOrderId: string;
   amount: string;
   currency: string;
   status: PaymentStatus;
   expiresAt: Date;
   /**
-   * SafeUPI's hosted checkout page. The client sends the student here; this is
+   * GuruPay's hosted checkout page. The client sends the student here; this is
    * the whole of the payment UI under the hosted-page flow.
    */
   paymentUrl: string;
-  /**
-   * Returned only for selected businesses, so it is very often absent and the
-   * client must not depend on it. Passed through when present purely so a
-   * desktop user can be shown a code instead of being sent to a phone-shaped
-   * page, but the hosted page renders its own QR regardless.
-   */
-  qrCode: string | null;
-  linkedMerchantId: string | null;
-  merchantUpiHash: string | null;
-  /**
-   * SafeUPI's Embedded JS Checkout — a modal opened client-side via their
-   * SDK instead of a full-page redirect to `paymentUrl`. `null` when SafeUPI
-   * doesn't return one for this business, mirroring `qrCode`'s optionality.
-   * Not persisted to the Payment row: it's short-lived and single-use, and
-   * nothing re-reads it after this response the way `paymentUrl` isn't
-   * re-derived either.
-   */
-  checkout: { token: string; sdkUrl: string; expiresAt: string } | null;
 }
 
 /**
@@ -456,7 +322,7 @@ export async function initiatePayment(
   const clientTxnId = newClientTxnId();
   const expiresAt = new Date(Date.now() + PAYMENT_WINDOW_MS);
 
-  // Recorded BEFORE the gateway is called. If create_order succeeds but its
+  // Recorded BEFORE the gateway is called. If create-order succeeds but its
   // response never reaches us, this row still holds the reference we sent — so
   // the webhook that follows can be matched to it, rather than arriving for a
   // payment we have no record of.
@@ -476,23 +342,17 @@ export async function initiatePayment(
 
   let data: CreateOrderData;
   try {
-    const envelope = await callGateway<CreateOrderData>(config, "/api/order/create", {
-      merchant_order_id: clientTxnId,
-      amount: amount.toFixed(2),
+    const envelope = await callGateway<CreateOrderData>(config, "/create-order", {
+      amount,
+      order_id: clientTxnId,
       customer_name: owner.customerName || "Customer",
-      // Required by SafeUPI even when we do not hold one. A guest ordering at
-      // the counter has neither, so a per-payment placeholder on our own domain
-      // stands in: it is syntactically valid, unmistakably not a real inbox,
-      // and unique so it can never collide with a real student's address.
-      customer_email: owner.customerEmail || `${clientTxnId.toLowerCase()}@guest.klh-canteen.invalid`,
-      customer_phone: owner.customerMobile || "0000000000",
-      // Where SafeUPI returns the browser once the hosted page is done. The
+      customer_mobile: owner.customerMobile,
+      // Where GuruPay returns the browser once the hosted page is done. The
       // payment id rides along so the landing page knows which payment to
       // confirm — it is an opaque lookup key, not a credential: the status
       // endpoint it feeds is owner-scoped and hands nothing to a stranger.
-      redirect_url: `${config.redirectUrl}${config.redirectUrl.includes("?") ? "&" : "?"}payment=${paymentId}`,
-      ...(config.merchantId ? { merchant_id: config.merchantId } : {}),
-      metadata: { payment_id: paymentId, orders: orderIds.join(",") },
+      callback_url: `${config.redirectUrl}${config.redirectUrl.includes("?") ? "&" : "?"}payment=${paymentId}`,
+      description: input.productInfo ?? "Canteen order",
     });
     if (!envelope.data) {
       throw new ApiError(502, "PAYMENT_GATEWAY_ERROR", "The payment gateway returned no order.");
@@ -506,7 +366,7 @@ export async function initiatePayment(
       sql`
         UPDATE "Payment"
            SET "status" = 'FAILED',
-               "failureReason" = 'gateway order/create failed',
+               "failureReason" = 'gateway create-order failed',
                "updatedAt" = NOW()
          WHERE "id" = ${paymentId}::text
       `,
@@ -514,7 +374,7 @@ export async function initiatePayment(
     throw err;
   }
 
-  const paymentUrl = data.payment?.url;
+  const paymentUrl = data.payment_url;
   if (!paymentUrl) {
     // Without somewhere to send the student there is no payment, so this is a
     // hard failure rather than a half-open row nobody can act on.
@@ -531,22 +391,11 @@ export async function initiatePayment(
     throw new ApiError(502, "PAYMENT_GATEWAY_ERROR", "The payment gateway returned no payment link.");
   }
 
-  const linkedMerchantId =
-    data.linked_merchant_id === null || data.linked_merchant_id === undefined
-      ? null
-      : String(data.linked_merchant_id);
-
-  // SafeUPI documents no expiry for the hosted page, so our own window stands
-  // as written at insert time — there is no gateway clock to defer to here.
   await query(
     pool,
     sql`
       UPDATE "Payment"
-         SET "gatewayOrderId" = ${data.system_order_id}::text,
-             "paymentUrl" = ${paymentUrl}::text,
-             "qrCode" = ${data.payment?.qr_code ?? null}::text,
-             "linkedMerchantId" = ${linkedMerchantId}::text,
-             "merchantUpiHash" = ${data.merchant_upi_id ?? null}::text,
+         SET "paymentUrl" = ${paymentUrl}::text,
              "updatedAt" = NOW()
        WHERE "id" = ${paymentId}::text
     `,
@@ -576,23 +425,11 @@ export async function initiatePayment(
   return {
     paymentId,
     clientTxnId,
-    gatewayOrderId: data.system_order_id,
     amount: amount.toFixed(2),
     currency: "INR",
     status: "PENDING",
     expiresAt,
     paymentUrl,
-    qrCode: data.payment?.qr_code ?? null,
-    linkedMerchantId,
-    merchantUpiHash: data.merchant_upi_id ?? null,
-    checkout:
-      data.payment?.checkout?.token && data.payment.checkout.sdk_url
-        ? {
-            token: data.payment.checkout.token,
-            sdkUrl: data.payment.checkout.sdk_url,
-            expiresAt: data.payment.checkout.expires_at ?? expiresAt.toISOString(),
-          }
-        : null,
   };
 }
 
@@ -600,54 +437,27 @@ export async function initiatePayment(
 // Settlement
 // ---------------------------------------------------------------------------
 
-/** Everything the webhook payload tells us that we act on. Both QR shapes
- *  (static and dynamic) are covered — they carry different reference fields,
- *  so every identifier is optional and matching tries them in turn. */
+/** A GuruPay webhook delivery. Flatter than SafeUPI's nested `data.*` shape —
+ *  GuruPay puts everything at the top level. */
 export interface WebhookPayload {
-  /** created | scanning | success | failed | cancelled */
+  /** e.g. "payment.success" */
   event?: string;
-  data?: {
-    id?: number;
-    status?: string;
-    amount?: number | string;
-    merchant_order_id?: string;
-    system_order_id?: string;
-    customer_name?: string;
-    customer_email?: string;
-    customer_phone?: string;
-    metadata?: Record<string, unknown> | null;
-    payment?: {
-      transaction_at?: string | number | null;
-      utr?: string | null;
-      customer_vpa?: string | null;
-    };
-  };
-  /** The shared secret SafeUPI echoes back. Checked, never stored or logged. */
-  secret?: string;
+  order_id?: string;
+  amount?: number | string;
+  utr?: string | null;
+  /** success | pending | failed */
+  status?: string;
 }
 
-/** Gateway vocabulary to ours. 'processing' folds into PENDING because it
- *  carries no decision — the money has neither arrived nor been refused. */
+/** Gateway vocabulary to ours. GuruPay documents only three outcomes, unlike
+ *  SafeUPI's richer set — anything else is unrecognised. */
 function mapGatewayStatus(raw: string | undefined): PaymentStatus | null {
   switch ((raw ?? "").toLowerCase()) {
     case "success":
       return "SUCCESS";
     case "failed":
       return "FAILED";
-    case "cancelled":
-    case "canceled":
-      // The student walked away. Terminal for us in exactly the way a failure
-      // is: the order is released and the food goes back on sale.
-      return "FAILED";
-    case "expired":
-      return "EXPIRED";
-    // "created" and "scanning" are progress notifications, not decisions —
-    // the money has neither arrived nor been refused — so both fold into
-    // PENDING and change nothing but the row's updatedAt.
-    case "created":
-    case "scanning":
     case "pending":
-    case "processing":
       return "PENDING";
     default:
       return null;
@@ -670,86 +480,60 @@ export interface SettlementResult {
 /**
  * Finds the payment a webhook is talking about.
  *
- * Three references are tried in descending order of trustworthiness:
- * client_txn_id is ours and unique by construction; order_id is the gateway's
- * and unique once we have stored it; udf1 is the truncated payment id, a last
- * resort for a delivery that somehow carries neither.
+ * GuruPay's `order_id` IS our clientTxnId — we chose it, and GuruPay simply
+ * echoes it back — so this is a single direct lookup, unlike SafeUPI's
+ * three-reference fallback chain (which existed because SafeUPI minted its
+ * own separate order id we had to also remember).
  */
 async function findPaymentForWebhook(
   db: RawRunner,
   payload: WebhookPayload,
 ): Promise<PaymentRow | null> {
-  const data = payload.data ?? {};
-
-  if (data.merchant_order_id) {
-    const { rows } = await query<PaymentRow>(
-      db,
-      sql`SELECT * FROM "Payment" WHERE "clientTxnId" = ${data.merchant_order_id}::text LIMIT 1`,
-    );
-    if (rows[0]) return rows[0];
-  }
-  if (data.system_order_id) {
-    const { rows } = await query<PaymentRow>(
-      db,
-      sql`SELECT * FROM "Payment" WHERE "gatewayOrderId" = ${data.system_order_id}::text LIMIT 1`,
-    );
-    if (rows[0]) return rows[0];
-  }
-
-  // Last resort: our own payment id, sent as metadata on create. Only reached
-  // when both references above are absent or unrecognised.
-  const metaId = data.metadata && typeof data.metadata === "object"
-    ? (data.metadata as Record<string, unknown>).payment_id
-    : undefined;
-  if (typeof metaId === "string" && metaId.length > 0) {
-    const { rows } = await query<PaymentRow>(
-      db,
-      sql`SELECT * FROM "Payment" WHERE "id" = ${metaId}::text LIMIT 1`,
-    );
-    if (rows[0]) return rows[0];
-  }
-  return null;
+  if (!payload.order_id) return null;
+  const { rows } = await query<PaymentRow>(
+    db,
+    sql`SELECT * FROM "Payment" WHERE "clientTxnId" = ${payload.order_id}::text LIMIT 1`,
+  );
+  return rows[0] ?? null;
 }
 
-/** What SafeUPI itself says about a payment, asked directly. */
+/** What GuruPay itself says about a payment, asked directly. */
 export interface GatewayTruth {
   status: PaymentStatus | null;
   amount: number | null;
   utr: string | null;
-  customerVpa: string | null;
-  systemOrderId: string | null;
+  gatewayTxnId: string | null;
 }
 
 /**
- * Asks SafeUPI what actually happened to a payment.
+ * Asks GuruPay what actually happened to a payment.
  *
- * This is the check that makes an unsigned webhook safe to act on. A forged
- * delivery can claim anything; it cannot make this endpoint agree. Every
- * settlement that releases food goes through here first — see the trust-model
- * note at the top of this module.
+ * This is the ONLY check that makes a webhook safe to act on — GuruPay sends
+ * no signature at all, so the incoming payload proves nothing by itself. See
+ * the trust-model note at the top of this module. Every settlement that
+ * releases food goes through here first.
  */
 export async function fetchGatewayStatus(
   config: PaymentConfig,
   clientTxnId: string,
 ): Promise<GatewayTruth> {
-  const envelope = await callGateway<CheckStatusData>(config, "/api/order/status", {
-    merchant_order_id: clientTxnId,
+  const envelope = await callGateway<CheckStatusData>(config, "/check-status", {
+    order_id: clientTxnId,
   });
   const data = envelope.data;
-  if (!data) return { status: null, amount: null, utr: null, customerVpa: null, systemOrderId: null };
+  if (!data) return { status: null, amount: null, utr: null, gatewayTxnId: null };
 
   const amount = Number(data.amount);
   return {
-    status: mapGatewayStatus(data.status),
+    status: mapGatewayStatus(data.payment_status),
     amount: Number.isFinite(amount) ? amount : null,
-    utr: data.payment?.utr ?? null,
-    customerVpa: data.payment?.customer_vpa ?? null,
-    systemOrderId: data.system_order_id ?? null,
+    utr: data.utr ?? null,
+    gatewayTxnId: data.gateway_txn_id ?? null,
   };
 }
 
 /**
- * Applies a webhook, after independently confirming it with SafeUPI.
+ * Applies a webhook, after independently confirming it with GuruPay.
  *
  * Runs in one transaction and takes `FOR UPDATE` on the payment row, because
  * the gateway may deliver the same event twice concurrently: without the lock
@@ -757,10 +541,10 @@ export async function fetchGatewayStatus(
  * both would confirm the orders. The row lock serialises them, and the second
  * one then sees a terminal status and does nothing.
  *
- * `config` is what separates this from the previous gateway's version. Passing
- * it turns on the Status API confirmation, which is REQUIRED for any outcome
- * that releases food: SafeUPI's webhook is unsigned, so the payload alone is
- * only a claim. Omitting it (the reconciliation path, which already has the
+ * `config` is what turns on the check-status confirmation, which is REQUIRED
+ * for any outcome that releases food: GuruPay's webhook is unsigned, so the
+ * payload alone proves nothing about who sent it or whether it is still
+ * true. Omitting `config` (the reconciliation path, which already has the
  * gateway's answer in hand) skips the second call rather than making it twice.
  */
 export async function applyWebhook(
@@ -768,7 +552,7 @@ export async function applyWebhook(
   payload: WebhookPayload,
   options: { config?: PaymentConfig; alreadyVerified?: boolean } = {},
 ): Promise<SettlementResult> {
-  const claimed = mapGatewayStatus(payload.data?.status ?? payload.event);
+  const claimed = mapGatewayStatus(payload.status ?? payload.event?.split(".").pop());
   if (!claimed) {
     return {
       changed: false,
@@ -776,20 +560,21 @@ export async function applyWebhook(
       status: null,
       confirmedOrderIds: [],
       releasedOrderIds: [],
-      reason: `unrecognised status "${payload.data?.status ?? payload.event ?? ""}"`,
+      reason: `unrecognised status "${payload.status ?? payload.event ?? ""}"`,
     };
   }
 
   /**
-   * Ask SafeUPI directly, BEFORE opening the transaction.
+   * Ask GuruPay directly, BEFORE opening the transaction.
    *
    * Before, because this is a network call and holding a row lock across one
    * would pin the payment row for as long as the gateway takes to answer —
    * exactly the mistake the two-statement order path was written to avoid.
    *
    * The gateway's answer replaces the payload's claim outright. A webhook that
-   * says "success" against a payment SafeUPI still calls pending settles
-   * nothing, which is precisely the forged-delivery case this exists to stop.
+   * says "success" against a payment GuruPay still calls pending settles
+   * nothing, which is precisely the leaked-secret-replay case this exists to
+   * stop.
    */
   let incoming = claimed;
   let verified = false;
@@ -813,7 +598,7 @@ export async function applyWebhook(
       truth = await fetchGatewayStatus(options.config, found.clientTxnId);
       verified = true;
     } catch (err) {
-      // Could not reach SafeUPI. Deliberately settles NOTHING rather than
+      // Could not reach GuruPay. Deliberately settles NOTHING rather than
       // falling back to the payload: an unverifiable claim is exactly what an
       // attacker would send, and the poll and expiry sweep both still run, so
       // a genuine payment is picked up moments later anyway.
@@ -840,8 +625,9 @@ export async function applyWebhook(
     }
 
     if (truth.status !== claimed) {
-      // Worth shouting about: either SafeUPI changed its mind between sending
-      // the webhook and answering us, or the delivery did not come from them.
+      // Worth shouting about: either GuruPay changed its mind between sending
+      // the webhook and answering us, or the delivery was replayed from a
+      // leaked secret against a payment that has since moved on.
       console.warn(
         "[payments] webhook disagrees with the gateway",
         { claimed, actual: truth.status, paymentId: found.id },
@@ -899,10 +685,10 @@ export async function applyWebhook(
       };
     }
 
-    // Replay guard. SafeUPI sends no idempotency key, so one is derived from
-    // the values that are unique to a settled transaction: the outcome plus
-    // the bank's UTR. A retry of the same delivery therefore produces the same
-    // key and is answered as the no-op it is.
+    // Replay guard. GuruPay sends no idempotency key of its own, so one is
+    // derived from the values that are unique to a settled transaction: the
+    // outcome plus the bank's UTR. A retry of the same delivery therefore
+    // produces the same key and is answered as the no-op it is.
     // Derived from the gateway's UTR only. A payload-supplied one would let a
     // forged delivery choose the replay key, and so decide whether a later
     // genuine delivery is mistaken for a duplicate and ignored.
@@ -938,19 +724,19 @@ export async function applyWebhook(
 
     // The money must match what we asked for. A success naming a different
     // amount is not a payment for this order — it is either a gateway fault or
-    // a tampered payload that cleared signature checking, and neither may be
-    // allowed to release food. Compared in paise to avoid float equality.
+    // a tampered payload, and neither may be allowed to release food.
+    // Compared in paise to avoid float equality.
     if (incoming === "SUCCESS") {
       const expectedPaise = Math.round(Number(payment.amount) * 100);
       // The gateway's figure, not the payload's — the payload is a claim.
-      const paidPaise = Math.round(Number(truth?.amount ?? payload.data?.amount ?? 0) * 100);
+      const paidPaise = Math.round(Number(truth?.amount ?? payload.amount ?? 0) * 100);
       if (paidPaise !== expectedPaise) {
         await query(
           client,
           sql`
             UPDATE "Payment"
                SET "status" = 'FAILED',
-                   "failureReason" = ${`amount mismatch: expected ${payment.amount}, gateway reported ${truth?.amount ?? payload.data?.amount}`}::text,
+                   "failureReason" = ${`amount mismatch: expected ${payment.amount}, gateway reported ${truth?.amount ?? payload.amount}`}::text,
                    "idempotencyKey" = COALESCE(${deliveryKey}::text, "idempotencyKey"),
                    "webhookCount" = "webhookCount" + 1,
                    "updatedAt" = NOW()
@@ -962,7 +748,7 @@ export async function applyWebhook(
         console.error("[payments] amount mismatch, payment refused", {
           paymentId: payment.id,
           expected: payment.amount,
-          received: truth?.amount ?? payload.data?.amount,
+          received: truth?.amount ?? payload.amount,
         });
         return {
           changed: true,
@@ -979,11 +765,11 @@ export async function applyWebhook(
      * Settlement facts come ONLY from the gateway's own answer, never from the
      * delivery.
      *
-     * The payload is attacker-shaped in exactly the case that matters: a forged
-     * webhook carrying a plausible UTR would otherwise be written straight into
-     * the payment record, poisoning the fields a later dispute is read from —
-     * even though the order itself was correctly refused. `truth` is always
-     * populated by the time this runs; applyWebhook returns earlier otherwise.
+     * The payload could in principle be replayed from a leaked secret with a
+     * plausible UTR; writing it straight into the payment record would poison
+     * the fields a later dispute is read from — even though the order itself
+     * was correctly refused. `truth` is always populated by the time this
+     * runs; applyWebhook returns earlier otherwise.
      */
     await query(
       client,
@@ -991,8 +777,7 @@ export async function applyWebhook(
         UPDATE "Payment"
            SET "status" = ${incoming}::text,
                "upiTxnId" = COALESCE(${truth?.utr ?? null}::text, "upiTxnId"),
-               "payerVpa" = COALESCE(${truth?.customerVpa ?? null}::text, "payerVpa"),
-               "gatewayOrderId" = COALESCE("gatewayOrderId", ${truth?.systemOrderId ?? null}::text),
+               "gatewayOrderId" = COALESCE("gatewayOrderId", ${truth?.gatewayTxnId ?? null}::text),
                "verifiedViaStatusApi" = ${verified}::boolean,
                "paidAt" = ${incoming === "SUCCESS" ? sql`NOW()` : sql`"paidAt"`},
                "failureReason" = ${
@@ -1251,19 +1036,16 @@ export async function reconcileWithGateway(
   // locking, amount check and idempotency route as a delivered one. There is
   // no second, subtly different settlement implementation to keep in step.
   //
-  // `alreadyVerified` because this answer came straight from the Status API —
+  // `alreadyVerified` because this answer came straight from check-status —
   // it IS the verification, so asking again would be the same call twice.
   return applyWebhook(
     pool,
     {
       event: truth.status.toLowerCase(),
-      data: {
-        status: truth.status.toLowerCase(),
-        merchant_order_id: payment.clientTxnId,
-        system_order_id: truth.systemOrderId ?? payment.gatewayOrderId ?? undefined,
-        amount: truth.amount ?? undefined,
-        payment: { utr: truth.utr, customer_vpa: truth.customerVpa },
-      },
+      status: truth.status.toLowerCase(),
+      order_id: payment.clientTxnId,
+      amount: truth.amount ?? undefined,
+      utr: truth.utr,
     },
     { alreadyVerified: true },
   );
@@ -1309,11 +1091,11 @@ export async function expireStalePayments(pool: Pool): Promise<number> {
 // ---------------------------------------------------------------------------
 
 /**
- * Records a delivery exactly as it arrived, minus the shared secret.
+ * Records a delivery exactly as it arrived.
  *
  * This is evidence, not application state: nothing reads it to make a
  * decision. It exists so that "the student says they paid but the order never
- * confirmed" is an answerable question — did SafeUPI send a success we
+ * confirmed" is an answerable question — did GuruPay send a success we
  * mishandled, or did they never send one? Without the raw body that is pure
  * speculation, because the request is gone once it returns.
  *
@@ -1329,10 +1111,6 @@ export async function recordWebhook(
 ): Promise<void> {
   try {
     const body = (payload ?? {}) as Record<string, any>;
-    // Never store the secret: it is the credential that authenticates a
-    // settlement, and a copy in the database is a copy an attacker can read.
-    const { secret, ...safe } = body;
-    const data = (safe.data ?? {}) as Record<string, any>;
 
     await query(
       db,
@@ -1340,11 +1118,11 @@ export async function recordWebhook(
         INSERT INTO "WebhookLog" ("id","event","status","merchantOrderId","systemOrderId","payload","authenticated","outcome")
         VALUES (
           ${crypto.randomUUID()}::text,
-          ${typeof safe.event === "string" ? safe.event : null}::text,
-          ${typeof data.status === "string" ? data.status : null}::text,
-          ${typeof data.merchant_order_id === "string" ? data.merchant_order_id : null}::text,
-          ${typeof data.system_order_id === "string" ? data.system_order_id : null}::text,
-          ${JSON.stringify(safe)}::jsonb,
+          ${typeof body.event === "string" ? body.event : null}::text,
+          ${typeof body.status === "string" ? body.status : null}::text,
+          ${typeof body.order_id === "string" ? body.order_id : null}::text,
+          ${null}::text,
+          ${JSON.stringify(body)}::jsonb,
           ${authenticated}::boolean,
           ${outcome}::text
         )
@@ -1362,8 +1140,8 @@ export async function recordWebhookOutcome(
   outcome: string | null,
 ): Promise<void> {
   try {
-    const data = ((payload as any)?.data ?? {}) as Record<string, any>;
-    const ref = typeof data.merchant_order_id === "string" ? data.merchant_order_id : null;
+    const body = (payload ?? {}) as Record<string, any>;
+    const ref = typeof body.order_id === "string" ? body.order_id : null;
     if (!ref) return;
     await query(
       db,

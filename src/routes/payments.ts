@@ -17,7 +17,6 @@ import {
   recordWebhook,
   recordWebhookOutcome,
   reconcileWithGateway,
-  verifyWebhook,
   type PaymentRow,
   type WebhookPayload,
   type SettlementResult,
@@ -36,19 +35,18 @@ import type { AppEnv } from "../types.js";
  * Endpoints:
  *   POST /payments/checkout      (STUDENT or guest session) — open a payment
  *   GET  /payments/:id           (owner only)               — poll status
- *   POST /payments/webhook       (public, signature-verified) — settle
+ *   POST /payments/webhook       (public, unauthenticated)  — settle
  *
- * The webhook is the only public route here, and it authenticates by HMAC
- * signature rather than by session — see the note above the handler.
+ * The webhook is the only public route here, and it cannot authenticate the
+ * caller — GuruPay signs nothing — so it never settles anything by itself;
+ * see the note above the handler.
  */
 export const paymentsRouter = new Hono<AppEnv>();
 
 const GUEST_SESSION_HEADER = "X-Guest-Session";
 
-/** Serialised payment, minus anything the owner has no use for. The webhook
- *  secret never touches this file, but the QR payload is large and only worth
- *  sending while the payment can still be completed. */
-function serializePayment(payment: PaymentRow, includeQr: boolean) {
+/** Serialised payment, minus anything the owner has no use for. */
+function serializePayment(payment: PaymentRow) {
   return {
     id: payment.id,
     status: payment.status,
@@ -59,9 +57,6 @@ function serializePayment(payment: PaymentRow, includeQr: boolean) {
     upiTxnId: payment.upiTxnId,
     payerVpa: payment.payerVpa,
     failureReason: payment.failureReason,
-    ...(includeQr
-      ? { qrCode: payment.qrCode, upiString: payment.upiString }
-      : {}),
   };
 }
 
@@ -111,17 +106,6 @@ const optionalStudentAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
   return requireAuth("STUDENT")(c, next);
 };
 
-/**
- * Whether a stored value is usable as an email address for the gateway.
- *
- * Deliberately a shape check, not validation: the only question is whether
- * SafeUPI will accept it, and the cost of a false negative is a placeholder
- * address rather than a failed payment.
- */
-function looksLikeEmail(value: string | null | undefined): boolean {
-  return typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
-}
-
 const checkoutSchema = z.object({
   orderIds: z.array(z.string().uuid()).min(1).max(4),
 });
@@ -157,23 +141,12 @@ paymentsRouter.post("/checkout", optionalStudentAuth, checkoutLimiter, async (c)
   // appears against a transaction.
   let customerName = "Customer";
   let customerMobile: string | undefined;
-  let customerEmail: string | undefined;
   if (owner.studentId) {
-    const { rows } = await query<{ name: string | null; email: string | null }>(
+    const { rows } = await query<{ name: string | null }>(
       pool,
-      sql`SELECT "name", "email" FROM "User" WHERE "id" = ${owner.studentId}::text LIMIT 1`,
+      sql`SELECT "name" FROM "User" WHERE "id" = ${owner.studentId}::text LIMIT 1`,
     );
     customerName = rows[0]?.name || "Customer";
-    // Only forwarded when it actually looks like an address.
-    //
-    // User.email doubles as the login identifier, and most student accounts
-    // hold a bare username there rather than an email — 154 of them at the
-    // time of writing, which is the majority. Passing one straight through
-    // earned a `422 Valid customer email is required` from SafeUPI and a 502
-    // at checkout, i.e. most students could not pay at all. Anything that is
-    // not address-shaped is treated as absent so the placeholder below is
-    // used instead.
-    customerEmail = looksLikeEmail(rows[0]?.email) ? rows[0]!.email! : undefined;
   } else {
     const { rows } = await query<{ guestName: string | null; guestPhone: string | null }>(
       pool,
@@ -194,7 +167,7 @@ paymentsRouter.post("/checkout", optionalStudentAuth, checkoutLimiter, async (c)
   try {
     payment = await initiatePayment(pool, bindings, {
       orderIds,
-      owner: { ...owner, customerName, customerMobile, customerEmail },
+      owner: { ...owner, customerName, customerMobile },
       productInfo: "Canteen order",
     });
   } catch (err) {
@@ -216,7 +189,6 @@ paymentsRouter.post("/checkout", optionalStudentAuth, checkoutLimiter, async (c)
     await logAction(pool, owner.studentId, "PAYMENT_INITIATED", "Payment", payment.paymentId, {
       amount: payment.amount,
       orderIds,
-      gatewayOrderId: payment.gatewayOrderId,
     });
   }
 
@@ -231,13 +203,6 @@ paymentsRouter.post("/checkout", optionalStudentAuth, checkoutLimiter, async (c)
       // the entire payment UI, so it is the one field the client cannot do
       // without.
       paymentUrl: payment.paymentUrl,
-      // Returned only for selected businesses, so usually null. Passed through
-      // for a desktop user who would rather scan than be redirected; the hosted
-      // page renders its own QR either way.
-      qrCode: payment.qrCode,
-      // Drives the Embedded JS Checkout modal. `paymentUrl` above stays in
-      // the response as the fallback if the SDK script fails to load.
-      checkout: payment.checkout,
       orderIds,
     },
     201,
@@ -285,7 +250,7 @@ paymentsRouter.get("/:id", optionalStudentAuth, statusLimiter, async (c) => {
 
   if (payment.status === "PENDING" && paymentsEnabled(bindings)) {
     // A gateway check ALWAYS comes before force-expiring, never instead of
-    // it. SafeUPI documents no expiry for its own hosted page, so a student
+    // it. GuruPay documents no expiry for its own hosted page, so a student
     // who wanders off and finishes paying hours after OUR window closed is
     // real and observed, not hypothetical — and the previous ordering
     // (expire-without-asking once past the window) would have permanently
@@ -299,11 +264,10 @@ paymentsRouter.get("/:id", optionalStudentAuth, statusLimiter, async (c) => {
     if (Date.now() - payment.updatedAt.getTime() >= RECONCILE_MIN_INTERVAL_MS) {
       // Throttled to one live gateway call per interval, not one per poll.
       // The frontend polls every 2s and a slow settlement can run for minutes
-      // — unthrottled, that is roughly 250+ calls to SafeUPI asking the same
+      // — unthrottled, that is a lot of calls to GuruPay asking the same
       // question the webhook will eventually answer anyway. It never shortens
       // their confirmation time (that delay is entirely on their side) and
-      // needlessly hammers their API, which for all we know is itself part of
-      // why their reconciliation is slow and inconsistent for this merchant.
+      // needlessly hammers their API.
       try {
         const settled = await reconcileWithGateway(pool, bindings, payment);
         if (settled?.changed) await broadcastSettlement(c, settled);
@@ -321,30 +285,28 @@ paymentsRouter.get("/:id", optionalStudentAuth, statusLimiter, async (c) => {
     }
   }
 
-  return c.json(serializePayment(payment, payment.status === "PENDING"));
+  return c.json(serializePayment(payment));
 });
 
 /**
  * Gateway webhook.
  *
- * PUBLIC — and deliberately so. The caller is SafeUPI's servers rather than a
+ * PUBLIC — and deliberately so. The caller is GuruPay's servers rather than a
  * browser, so there is no session to authenticate against.
  *
- * WHAT AUTHENTICATES IT, AND WHY THAT IS NOT ENOUGH. SafeUPI does not sign its
- * webhooks; it echoes a shared secret in the request body. That is a bearer
- * check: it says the sender knew the secret, and nothing at all about whether
- * the payload is true. Anything that ever sees one delivery — a log line, a
- * proxy, a misdirected request — learns the secret and can then forge a
- * "success" for any order it can name.
+ * THERE IS NOTHING HERE THAT AUTHENTICATES THE CALLER. GuruPay signs nothing
+ * — no header, no shared secret, no HMAC — so anyone who can guess or observe
+ * an order_id can POST a "success" for it, and this handler has no way to
+ * tell that delivery apart from a genuine one. It is therefore never trusted:
+ * the payload is used only to look up WHICH payment to ask about. Before a
+ * single order is released, applyWebhook independently calls GuruPay's
+ * check-status API and acts ONLY on that answer — see the trust-model note at
+ * the top of paymentService.ts. A forged POST to this endpoint accomplishes
+ * nothing unless GuruPay's own records also say "success".
  *
- * So the secret only buys the caller the right to be listened to. Before a
- * single order is released, applyWebhook independently asks SafeUPI's Status
- * API what actually happened, and the gateway's answer overrides whatever the
- * payload claimed. Forging a delivery is therefore not enough on its own.
- *
- * A verified delivery is always answered 200, even when it changed nothing:
- * SafeUPI retries anything else, and a duplicate we correctly ignored is not a
- * failure worth retrying.
+ * Every well-formed delivery is answered 200, even when it changed nothing:
+ * a duplicate, or an unmatched/forged order_id, is not a failure worth the
+ * gateway retrying.
  */
 paymentsRouter.post("/webhook", async (c) => {
   const bindings = getBindings(c);
@@ -366,8 +328,6 @@ paymentsRouter.post("/webhook", async (c) => {
     return c.json({ error: "Malformed payload" }, 400);
   }
 
-  const body = payload as { secret?: unknown };
-  const verification = verifyWebhook(config.webhookSecret, body.secret);
   const pool = getRequestPool(c);
 
   /**
@@ -375,26 +335,15 @@ paymentsRouter.post("/webhook", async (c) => {
    *
    * A payment that fails "somewhere between the UPI app and the order" is
    * otherwise unanswerable after the fact — the request body is the only
-   * evidence of what SafeUPI actually said, and it is gone once the request
-   * ends. Written for rejected deliveries too: a run of unauthenticated ones
-   * means either someone is probing the endpoint or the dashboard secret has
-   * drifted from ours, and both are invisible without this.
-   *
-   * The secret is stripped first. It is a bearer credential, and storing it
-   * would put in the database exactly the value that lets anyone forge a
-   * settlement.
+   * evidence of what GuruPay actually said, and it is gone once the request
+   * ends. `authenticated` is always true here: there is no signature to fail,
+   * so the field only ever recorded whether the body parsed as JSON, and the
+   * real gate is applyWebhook's check-status call below.
    */
-  await recordWebhook(pool, payload, verification.ok, null);
+  await recordWebhook(pool, payload, true, null);
 
-  if (!verification.ok) {
-    // Logged without the body: an unverified payload is attacker-controlled,
-    // and in this scheme the body carries a credential — logging it would leak
-    // the very secret being checked.
-    console.warn("[payments] rejected webhook:", verification.reason);
-    return c.json({ error: "Unauthorized" }, 401);
-  }
-
-  // `config` is what turns on the Status API confirmation — see applyWebhook.
+  // `config` is what turns on the Status API confirmation — the only thing
+  // that makes it safe to act on this payload at all. See applyWebhook.
   const result = await applyWebhook(pool, payload as WebhookPayload, { config });
   await recordWebhookOutcome(pool, payload, result.status ?? result.reason ?? null);
 

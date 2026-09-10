@@ -14,15 +14,16 @@ import * as menuItemRepo from "../src/db/menuItemRepo.js";
 /**
  * Settlement, end to end, without a live merchant.
  *
- * SafeUPI is needed only to obtain a payment link. Everything that happens
+ * GuruPay is needed only to obtain a payment link. Everything that happens
  * after the money moves is ours, and it is the half that actually releases
  * food, so it is proved here by posting webhooks at the real endpoint with
- * SafeUPI's Status API stubbed.
+ * GuruPay's check-status API stubbed.
  *
- * BOTH sides are controlled on purpose. SafeUPI's webhook is unsigned, so the
- * delivery alone is only a claim; applyWebhook confirms it against the Status
- * API before releasing anything. Several tests below make the two disagree,
- * because that disagreement is the forged-webhook case.
+ * The webhook itself proves nothing — GuruPay signs nothing — so applyWebhook
+ * treats every delivery as a bare claim and confirms it against check-status
+ * before releasing anything. Several tests below make the two disagree,
+ * because that disagreement is exactly the forged/replayed-delivery case the
+ * check-status call defends against.
  */
 
 /**
@@ -37,9 +38,6 @@ process.env.PAYMENTS_ENABLED = "true";
 
 const pool = testDb.enabled ? getTestPool() : (undefined as any);
 const server = testDb.enabled ? await startTestServer() : (undefined as any);
-
-/** Matches SAFEUPI_WEBHOOK_SECRET in .env.test — deliberately not real. */
-const WEBHOOK_SECRET = "whsec_test_secret_not_real_do_not_use";
 
 async function makeStudent() {
   return userRepo.insert(pool, {
@@ -91,7 +89,7 @@ async function seedAwaitingPayment(options: { qty?: number; amount?: string; pri
     pool,
     sql`
       INSERT INTO "Payment" ("id","clientTxnId","gatewayOrderId","amount","currency","status","studentId","expiresAt","createdAt","updatedAt")
-      VALUES (${paymentId}::text, ${clientTxnId}::text, ${`gw-${clientTxnId}`}::text, ${amount}::numeric,
+      VALUES (${paymentId}::text, ${clientTxnId}::text, ${null}::text, ${amount}::numeric,
               'INR','PENDING', ${student.id}::text, NOW() + INTERVAL '2 minutes', NOW(), NOW())
     `,
   );
@@ -124,17 +122,16 @@ async function seedAwaitingPayment(options: { qty?: number; amount?: string; pri
 }
 
 /**
- * What SafeUPI's Status API will claim on the next call.
+ * What GuruPay's check-status API will claim on the next call.
  *
  * applyWebhook confirms every settlement against that endpoint before it
- * releases anything, so these tests must control BOTH sides: the delivery, and
- * the gateway's own answer. That is the point — a webhook alone proves nothing
- * here, which is precisely the property being tested.
+ * releases anything, so these tests must control BOTH sides: the delivery,
+ * and the gateway's own answer. That is the point — a signed webhook alone
+ * proves who sent it, not that the claim still holds, which is precisely the
+ * property being tested.
  */
-let gatewayTruth:
-  | { status: string; amount: string | number; utr?: string | null; vpa?: string | null }
-  | null = null;
-/** Set to make the Status API call fail, as an unreachable gateway would. */
+let gatewayTruth: { status: string; amount: string | number; utr?: string | null } | null = null;
+/** Set to make the check-status call fail, as an unreachable gateway would. */
 let gatewayUnreachable = false;
 
 const realFetch = globalThis.fetch;
@@ -142,29 +139,25 @@ const realFetch = globalThis.fetch;
 beforeAll(() => {
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = String(typeof input === "string" ? input : input?.url ?? "");
-    if (url.includes("safeupi.com/api/order/status")) {
+    if (url.includes("gurupaygateway.com/api/check-status")) {
       if (gatewayUnreachable) throw new TypeError("fetch failed");
       const body = JSON.parse(String(init?.body ?? "{}"));
       if (!gatewayTruth) {
-        return new Response(JSON.stringify({ success: false, message: "Order not found" }), { status: 200 });
+        return new Response(JSON.stringify({ status: "error", message: "Order not found" }), { status: 200 });
       }
       return new Response(
         JSON.stringify({
-          success: true,
-          message: "Order status retrieved successfully",
+          status: "success",
           data: {
-            id: 1,
-            system_order_id: `SU-${body.merchant_order_id}`,
-            merchant_order_id: body.merchant_order_id,
-            status: gatewayTruth.status,
-            amount: String(gatewayTruth.amount),
-            payment: {
-              // `?? default` would override an explicit null, which is exactly
-              // the case the disagreement test needs: a gateway that reports no
-              // UTR at all.
-              utr: "utr" in gatewayTruth ? gatewayTruth.utr : "100852466451",
-              customer_vpa: "vpa" in gatewayTruth ? gatewayTruth.vpa : "student@upi",
-            },
+            order_id: body.order_id,
+            amount: gatewayTruth.amount,
+            currency: "INR",
+            payment_status: gatewayTruth.status,
+            // `?? default` would override an explicit null, which is exactly
+            // the case the disagreement test needs: a gateway that reports no
+            // UTR at all.
+            utr: "utr" in gatewayTruth ? gatewayTruth.utr : "100852466451",
+            gateway_txn_id: `GP-${body.order_id}`,
           },
         }),
         { status: 200 },
@@ -178,32 +171,20 @@ afterAll(() => {
   globalThis.fetch = realFetch;
 });
 
-/**
- * Posts a webhook the way SafeUPI does: a plain JSON body carrying the shared
- * secret. There is no signature to compute — that is the whole reason the
- * Status API confirmation exists.
- */
-async function postWebhook(
-  payload: Record<string, unknown>,
-  options: { secret?: string } = {},
-) {
-  return request(server)
-    .post("/payments/webhook")
-    .set("Content-Type", "application/json")
-    .send({ ...payload, secret: options.secret ?? WEBHOOK_SECRET });
-}
-
-/** A SafeUPI webhook body for one payment. */
+/** A GuruPay webhook body for one payment — flat, unlike SafeUPI's nested
+ *  `data.*` shape. */
 function webhookBody(event: string, clientTxnId: string, extra: Record<string, unknown> = {}) {
   return {
-    event,
-    data: {
-      status: event,
-      merchant_order_id: clientTxnId,
-      system_order_id: `SU-${clientTxnId}`,
-      ...extra,
-    },
+    event: `payment.${event}`,
+    order_id: clientTxnId,
+    status: event,
+    ...extra,
   };
+}
+
+/** Posts a webhook the way GuruPay does: a bare, unsigned JSON POST. */
+async function postWebhook(payload: Record<string, unknown>) {
+  return request(server).post("/payments/webhook").send(payload);
 }
 
 async function readOrder(orderId: string) {
@@ -363,37 +344,19 @@ describeDb("payment settlement", () => {
     expect(await readReserved(item.id)).toBe(qty);
   });
 
-  it("rejects a forged signature and changes nothing", async () => {
-    const { orderId, paymentId, clientTxnId, amount, item, qty } = await seedAwaitingPayment();
-
-    gatewayTruth = { status: "success", amount, utr: "403993715517" };
-    const res = await postWebhook(webhookBody("success", clientTxnId), {
-      secret: "whsec_attacker_guessed_this",
-    });
-
-    expect(res.status).toBe(401);
-
-    // The order stayed hidden. This is the test that matters most: without
-    // signature verification, this request alone would have released food.
-    const order = await readOrder(orderId);
-    expect(order.awaitingPayment).toBe(true);
-    expect(order.status).toBe("PENDING");
-    expect((await readPayment(paymentId)).status).toBe("PENDING");
-    expect(await readReserved(item.id)).toBe(qty);
-  });
-
   /**
-   * The defence that replaces signature verification.
+   * The defence that has to carry the whole load now that there is no
+   * signature at all.
    *
-   * An attacker who learns the shared secret — from a log, a proxy, anywhere a
-   * webhook body has ever been written down — can send a perfectly
-   * authenticated "success". This is that attack, and it fails: the Status API
-   * still says pending, so nothing is released.
+   * Anyone who can guess or observe an order_id can POST a "success" for it —
+   * there is nothing to forge, because there is nothing checked on the way
+   * in. This is that attack, and it fails: check-status still says pending,
+   * so nothing is released.
    */
   it("releases nothing when the gateway disagrees with a well-formed webhook", async () => {
     const { orderId, paymentId, clientTxnId, item, qty } = await seedAwaitingPayment();
 
-    // SafeUPI itself says the money never arrived.
+    // GuruPay itself says the money never arrived.
     gatewayTruth = { status: "pending", amount: "30.00" };
     const res = await postWebhook(webhookBody("success", clientTxnId));
 
@@ -408,22 +371,18 @@ describeDb("payment settlement", () => {
   });
 
   /**
-   * Found by probing the real endpoint: the forged webhook was correctly
-   * refused, but its fabricated UTR was still written to the payment row,
-   * because the write fell back to the payload when the gateway had no UTR of
-   * its own. Nothing was released, so it looked fine — while quietly poisoning
-   * the fields a later dispute is read from.
+   * Found by probing the real endpoint under SafeUPI: a forged webhook was
+   * correctly refused, but its fabricated UTR was still written to the
+   * payment row, because the write fell back to the payload when the gateway
+   * had no UTR of its own. Nothing was released, so it looked fine — while
+   * quietly poisoning the fields a later dispute is read from. Re-verified
+   * here under GuruPay's shape since the write path is unchanged.
    */
   it("stores no attacker-supplied data from a webhook the gateway disagrees with", async () => {
     const { paymentId, clientTxnId } = await seedAwaitingPayment();
 
-    gatewayTruth = { status: "pending", amount: "30.00", utr: null, vpa: null };
-    await postWebhook(
-      webhookBody("success", clientTxnId, {
-        payment: { utr: "999888777666", customer_vpa: "attacker@upi" },
-        customer_name: "Attacker",
-      }),
-    );
+    gatewayTruth = { status: "pending", amount: "30.00", utr: null };
+    await postWebhook(webhookBody("success", clientTxnId, { utr: "999888777666", amount: 30 }));
 
     const { rows } = await query<{
       upiTxnId: string | null;
@@ -455,7 +414,7 @@ describeDb("payment settlement", () => {
     expect(await readReserved(item.id)).toBe(qty);
   });
 
-  it("records that a settlement was confirmed against the Status API", async () => {
+  it("records that a settlement was confirmed against check-status", async () => {
     const { paymentId, clientTxnId, amount } = await seedAwaitingPayment();
 
     gatewayTruth = { status: "success", amount, utr: "403993715517" };
@@ -551,19 +510,15 @@ describeDb("payment settlement", () => {
     expect(await readReserved(item.id)).toBe(qty);
   });
 
-  /**
-   * Found in the browser as a 502 at checkout.
-   *
-   * User.email doubles as the login identifier, and most student accounts hold
-   * a bare username there — a roll number, usually — rather than an address.
-   * Forwarding one to SafeUPI earned `422 Valid customer email is required`,
-   * so the majority of students could not pay at all.
-   */
-  it("does not send a non-address login identifier to the gateway as an email", async () => {
+  it("opens a checkout without requiring a customer email", async () => {
+    // GuruPay's create-order API asks for amount/order_id/customer_name and
+    // never an email — unlike SafeUPI, which 422'd most students because
+    // User.email usually holds a bare roll number rather than an address.
+    // This exercises the checkout route end to end to confirm no email is
+    // sent and none is required for it to succeed.
     const student = await userRepo.insert(pool, {
       role: "STUDENT",
       rollNumber: null,
-      // Exactly the shape the live rows have: a roll number in the email column.
       email: `24200${Math.floor(Math.random() * 1e5)}`,
       passwordHash: await bcrypt.hash("x", 4),
       name: "Username Only",
@@ -578,21 +533,21 @@ describeDb("payment settlement", () => {
       .send({ items: [{ menuItemId: item.id, qty: 1 }] });
     expect(placed.status).toBe(201);
 
-    let sentEmail: string | undefined;
+    let sentBody: Record<string, unknown> | undefined;
     const previous = globalThis.fetch;
     globalThis.fetch = (async (input: any, init?: any) => {
       const url = String(typeof input === "string" ? input : input?.url ?? "");
-      if (url.includes("safeupi.com/api/order/create")) {
-        sentEmail = JSON.parse(String(init?.body ?? "{}")).customer_email;
+      if (url.includes("gurupaygateway.com/api/create-order")) {
+        sentBody = JSON.parse(String(init?.body ?? "{}"));
         return new Response(
           JSON.stringify({
-            success: true,
-            message: "Order created successfully",
+            status: "success",
             data: {
-              id: 1,
-              system_order_id: "AP-test",
-              merchant_order_id: "x",
-              payment: { url: "https://www.safeupi.com/api/gateway/pay?id=test" },
+              payment_url: "https://www.gurupaygateway.com/pay/test-token",
+              order_id: sentBody!.order_id,
+              token: "test-token",
+              amount: sentBody!.amount,
+              currency: "INR",
             },
           }),
           { status: 200 },
@@ -608,9 +563,8 @@ describeDb("payment settlement", () => {
     globalThis.fetch = previous;
 
     expect(res.status).toBe(201);
-    // A real address or the generated placeholder — never the raw identifier.
-    expect(sentEmail).toMatch(/^[^\s@]+@[^\s@]+\.[^\s@]+$/);
-    expect(sentEmail).not.toBe(student.email);
+    expect(sentBody).not.toHaveProperty("customer_email");
+    expect(res.body.paymentUrl).toBe("https://www.gurupaygateway.com/pay/test-token");
   });
 
   it("ignores a webhook naming a payment we have no record of", async () => {

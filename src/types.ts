@@ -70,41 +70,21 @@ export interface Bindings {
    */
   PAYMENTS_ENABLED?: string;
   /**
-   * SafeUPI API key, sent as `secret` in every request body.
+   * GuruPay merchant API key, sent as the `X-Guru-Key` header on every
+   * request — a header, unlike SafeUPI's body-field scheme, so it never
+   * appears in a logged or echoed request body.
    *
-   * SafeUPI offers no header form, so this credential necessarily travels in
-   * the body — which is why nothing in paymentService.ts ever logs a request
-   * body, only responses.
-   *
-   * Secret — `wrangler secret put SAFEUPI_API_SECRET`.
+   * Secret — `wrangler secret put GURUPAY_API_KEY`.
    */
-  SAFEUPI_API_SECRET?: string;
+  GURUPAY_API_KEY?: string;
   /**
-   * The value SafeUPI echoes back inside a webhook body.
-   *
-   * NOT a signing key: SafeUPI does not sign its webhooks, so this proves only
-   * that the sender knows the secret and nothing about the payload's
-   * integrity. It is therefore necessary but not sufficient — every settlement
-   * is independently confirmed against SafeUPI's Status API before food is
-   * released. Treat it like a password all the same: anything that ever logs a
-   * webhook body leaks it.
-   *
-   * Secret — `wrangler secret put SAFEUPI_WEBHOOK_SECRET`.
-   */
-  SAFEUPI_WEBHOOK_SECRET?: string;
-  /**
-   * Where SafeUPI returns the student's browser after the hosted payment page.
+   * Where GuruPay returns the student's browser after the hosted payment page.
    * A public frontend URL, so it lives in vars rather than as a secret.
    *
    * The payment id is appended as a query parameter at create time, so this
    * should be the bare landing route.
    */
-  SAFEUPI_REDIRECT_URL?: string;
-  /**
-   * Optional connected-merchant id to route payments to. Omitted, SafeUPI uses
-   * the business default and falls back to other eligible merchants.
-   */
-  SAFEUPI_MERCHANT_ID?: string;
+  GURUPAY_REDIRECT_URL?: string;
 }
 
 export interface AuthUser {
