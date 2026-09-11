@@ -499,6 +499,7 @@ interface OrderItemJoinRow {
   mi_sortOrder: number;
   mi_servingInfo: string | null;
   mi_servingInfoVisible: boolean;
+  mi_school: School;
 }
 
 /**
@@ -531,7 +532,7 @@ async function hydrateOrders<T extends { id: string; studentId: string | null }>
              mi."reservedQty" AS "mi_reservedQty", mi."isAvailable" AS "mi_isAvailable",
              mi."isArchived" AS "mi_isArchived", mi."categoryId" AS "mi_categoryId",
              mi."sortOrder" AS "mi_sortOrder", mi."servingInfo" AS "mi_servingInfo",
-             mi."servingInfoVisible" AS "mi_servingInfoVisible"
+             mi."servingInfoVisible" AS "mi_servingInfoVisible", mi."school" AS "mi_school"
         FROM "OrderItem" oi
         JOIN "MenuItem" mi ON mi."id" = oi."menuItemId"
        WHERE oi."orderId" = ANY(${orderIds}::text[])
@@ -570,6 +571,7 @@ async function hydrateOrders<T extends { id: string; studentId: string | null }>
         // hidden in a student's/guest's own order history too, not just the menu.
         servingInfo: opts.maskHiddenServingInfo && !row.mi_servingInfoVisible ? null : row.mi_servingInfo,
         servingInfoVisible: row.mi_servingInfoVisible,
+        school: row.mi_school,
       },
     });
     itemsByOrder.set(row.orderId, bucket);
@@ -1047,6 +1049,7 @@ export const DEFAULT_HISTORY_LOOKBACK_DAYS = 7;
 
 export interface OrderPageOptions {
   kitchen?: string;
+  school?: School;
   /** Explicit status filter. Wins over `includeDelivered`. */
   statuses?: string[];
   /** Include DELIVERED orders. Default false — the board wants live work. */
@@ -1154,6 +1157,7 @@ export async function getAllOrders(pool: Pool, options: OrderPageOptions = {}) {
   // FALSE here and are unaffected.
   where.and(`"awaitingPayment" = FALSE`);
   if (options.kitchen) where.and(`"kitchen" = $1::"Kitchen"`, options.kitchen);
+  if (options.school) where.and('"school" = $1::"School"', options.school);
   if (statuses) where.and(`"status"::text = ANY($1::text[])`, statuses);
 
   // Date bounds are passed as ISO-UTC strings cast to `::timestamp` rather
@@ -1296,7 +1300,13 @@ const NEXT_STATUS: Record<string, string> = {
   COOKED: "DELIVERED",
 };
 
-export async function openOrderForAdmin(pool: Pool, orderId: string, adminId: string, adminKitchen?: string | null) {
+export async function openOrderForAdmin(
+  pool: Pool,
+  orderId: string,
+  adminId: string,
+  adminKitchen?: string | null,
+  adminSchool?: School | null,
+) {
   // Read-then-write collapsed into one round trip: every CASE branch that
   // depends on the row's *current* state (kitchen match, already-seen,
   // someone else's lock) reads the pre-update column directly, so an
@@ -1307,7 +1317,9 @@ export async function openOrderForAdmin(pool: Pool, orderId: string, adminId: st
   // ISO-UTC string cast to `::timestamp`, not a raw Date param — see the
   // comment on getCollectionWindows.
   const nowIso = new Date().toISOString();
-  const authorized = adminKitchen ? sql`"kitchen" = ${adminKitchen}::"Kitchen"` : sql`TRUE`;
+  const kitchenAuthorized = adminKitchen ? sql`"kitchen" = ${adminKitchen}::"Kitchen"` : sql`TRUE`;
+  const schoolAuthorized = adminSchool ? sql`"school" = ${adminSchool}::"School"` : sql`TRUE`;
+  const authorized = sql`(${kitchenAuthorized}) AND (${schoolAuthorized})`;
   const lockedByOtherStillValid = sql`
     "status" <> 'DELIVERED'
     AND "lockedByAdminId" IS NOT NULL
@@ -1342,6 +1354,9 @@ export async function openOrderForAdmin(pool: Pool, orderId: string, adminId: st
   if (adminKitchen && order.kitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", `This order belongs to the ${order.kitchen} kitchen.`);
   }
+  if (adminSchool && order.school !== adminSchool) {
+    throw new ApiError(403, "INVALID_SCHOOL", `This order belongs to a different school.`);
+  }
 
   // Mirrors lockedByOtherStillValid against the POST-update row: when it was
   // true, our own UPDATE left lockedByAdminId/lockedAt untouched (still the
@@ -1358,17 +1373,31 @@ export async function openOrderForAdmin(pool: Pool, orderId: string, adminId: st
   return { ...withCustomer(hydrated), isLockedByOther };
 }
 
-export async function updateOrderStatus(pool: Pool, orderId: string, targetStatus: string, adminKitchen?: string | null) {
+export async function updateOrderStatus(
+  pool: Pool,
+  orderId: string,
+  targetStatus: string,
+  adminKitchen?: string | null,
+  adminSchool?: School | null,
+) {
   return withTransaction(pool, async (client) => {
-    const { rows: existingRows } = await query<{ status: OrderStatus; kitchen: Kitchen; awaitingPayment: boolean }>(
+    const { rows: existingRows } = await query<{
+      status: OrderStatus;
+      kitchen: Kitchen;
+      awaitingPayment: boolean;
+      school: School;
+    }>(
       client,
-      sql`SELECT "status", "kitchen", "awaitingPayment" FROM "Order" WHERE "id" = ${orderId}::text FOR UPDATE`,
+      sql`SELECT "status", "kitchen", "awaitingPayment", "school" FROM "Order" WHERE "id" = ${orderId}::text FOR UPDATE`,
     );
     if (existingRows.length === 0) throw new ApiError(404, "NOT_FOUND", "Order not found");
     const existing = existingRows[0];
 
     if (adminKitchen && existing.kitchen !== adminKitchen) {
       throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to update this kitchen's orders.");
+    }
+    if (adminSchool && existing.school !== adminSchool) {
+      throw new ApiError(403, "INVALID_SCHOOL", "You do not have permission to update this school's orders.");
     }
     // Belt and braces: getAllOrders already hides unsettled orders, so an
     // admin has no way to see this one. Refused here as well because the cost

@@ -18,14 +18,14 @@ import type { MenuItem } from "../src/db/schema.js";
 const pool = testDb.enabled ? getTestPool() : (undefined as any);
 const server = testDb.enabled ? await startTestServer() : (undefined as any);
 
-async function makeAdminToken() {
+async function makeAdminToken(school: "KLH" | "DRK" = "KLH") {
   const passwordHash = await bcrypt.hash("x", 12);
   const admin = await userRepo.insert(pool, {
     role: "ADMIN",
-    email: `admin-${Date.now()}@klh.edu.in`,
+    email: `admin-${Date.now()}-${Math.random().toString(36).slice(2)}@klh.edu.in`,
     passwordHash,
     name: "A",
-    school: "KLH",
+    school,
   });
   return signToken({ sub: admin.id, role: "ADMIN" }, process.env.JWT_SECRET!);
 }
@@ -86,6 +86,7 @@ describeDb("Menu availability projection", () => {
       name: `Cat-${Date.now()}-${Math.round(stockQty * 1000 + reservedQty)}`,
       sortOrder: 0,
       kitchen: "SNACKS",
+      school: "KLH",
     });
     // MenuItemCreateInput always starts at reservedQty=0/isAvailable=true, so
     // this test's non-default starting state is inserted directly.
@@ -169,5 +170,190 @@ describeDb("Menu availability projection", () => {
 
     const customerRes = await request(server).get("/menu");
     expect(findItem(customerRes.body, item.id)).toBeUndefined();
+  });
+});
+
+/**
+ * Category and MenuItem inventory is now school-scoped (Category.school,
+ * MenuItem.school — denormalized from the owning category). KLH and DRK admins
+ * must never be able to read, create, edit, or delete across that boundary,
+ * and a school-less menu read must not leak the other school's rows.
+ */
+describeDb("Menu school isolation", () => {
+  it("denormalizes a new item's school from its category, not from a caller-supplied value", async () => {
+    const token = await makeAdminToken("KLH");
+
+    const catRes = await request(server)
+      .post("/admin/categories")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ name: "KLH Snacks", sortOrder: 1 });
+    expect(catRes.status).toBe(201);
+    expect(catRes.body.school).toBe("KLH");
+
+    const itemRes = await request(server)
+      .post("/admin/menu-items")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        name: "Vada Pav",
+        price: "15.00",
+        stockQty: 10,
+        categoryId: catRes.body.id,
+      });
+    expect(itemRes.status).toBe(201);
+    expect(itemRes.body.school).toBe("KLH");
+  });
+
+  it("a DRK admin cannot create a category tagged KLH — it always takes the creating admin's own school", async () => {
+    const drkToken = await makeAdminToken("DRK");
+
+    const catRes = await request(server)
+      .post("/admin/categories")
+      .set("Authorization", `Bearer ${drkToken}`)
+      .send({ name: "DRK Snacks", sortOrder: 1 });
+
+    expect(catRes.status).toBe(201);
+    expect(catRes.body.school).toBe("DRK");
+  });
+
+  it("blocks a DRK admin from editing a KLH category", async () => {
+    const klhToken = await makeAdminToken("KLH");
+    const drkToken = await makeAdminToken("DRK");
+
+    const catRes = await request(server)
+      .post("/admin/categories")
+      .set("Authorization", `Bearer ${klhToken}`)
+      .send({ name: "KLH Meals", sortOrder: 1 });
+    expect(catRes.status).toBe(201);
+
+    const patchRes = await request(server)
+      .patch(`/admin/categories/${catRes.body.id}`)
+      .set("Authorization", `Bearer ${drkToken}`)
+      .send({ name: "Hijacked" });
+
+    expect(patchRes.status).toBe(403);
+    expect(patchRes.body.code ?? patchRes.body.error).toBeDefined();
+  });
+
+  it("blocks a DRK admin from deleting a KLH category", async () => {
+    const klhToken = await makeAdminToken("KLH");
+    const drkToken = await makeAdminToken("DRK");
+
+    const catRes = await request(server)
+      .post("/admin/categories")
+      .set("Authorization", `Bearer ${klhToken}`)
+      .send({ name: "KLH Beverages", sortOrder: 1 });
+    expect(catRes.status).toBe(201);
+
+    const delRes = await request(server)
+      .delete(`/admin/categories/${catRes.body.id}`)
+      .set("Authorization", `Bearer ${drkToken}`);
+
+    expect(delRes.status).toBe(403);
+  });
+
+  it("blocks a DRK admin from adding an item to a KLH category", async () => {
+    const klhToken = await makeAdminToken("KLH");
+    const drkToken = await makeAdminToken("DRK");
+
+    const catRes = await request(server)
+      .post("/admin/categories")
+      .set("Authorization", `Bearer ${klhToken}`)
+      .send({ name: "KLH Combo", sortOrder: 1 });
+    expect(catRes.status).toBe(201);
+
+    const itemRes = await request(server)
+      .post("/admin/menu-items")
+      .set("Authorization", `Bearer ${drkToken}`)
+      .send({
+        name: "Smuggled Item",
+        price: "10.00",
+        stockQty: 5,
+        categoryId: catRes.body.id,
+      });
+
+    expect(itemRes.status).toBe(403);
+  });
+
+  it("blocks a DRK admin from editing or deleting a KLH menu item", async () => {
+    const klhToken = await makeAdminToken("KLH");
+    const drkToken = await makeAdminToken("DRK");
+
+    const catRes = await request(server)
+      .post("/admin/categories")
+      .set("Authorization", `Bearer ${klhToken}`)
+      .send({ name: "KLH Desserts", sortOrder: 1 });
+    const itemRes = await request(server)
+      .post("/admin/menu-items")
+      .set("Authorization", `Bearer ${klhToken}`)
+      .send({
+        name: "Gulab Jamun",
+        price: "25.00",
+        stockQty: 20,
+        categoryId: catRes.body.id,
+      });
+    expect(itemRes.status).toBe(201);
+
+    const patchRes = await request(server)
+      .patch(`/admin/menu-items/${itemRes.body.id}`)
+      .set("Authorization", `Bearer ${drkToken}`)
+      .send({ stockQty: 999 });
+    expect(patchRes.status).toBe(403);
+
+    const delRes = await request(server)
+      .delete(`/admin/menu-items/${itemRes.body.id}`)
+      .set("Authorization", `Bearer ${drkToken}`);
+    expect(delRes.status).toBe(403);
+  });
+
+  it("scopes the public menu read to the requested school only", async () => {
+    const klhToken = await makeAdminToken("KLH");
+    const drkToken = await makeAdminToken("DRK");
+
+    const klhCat = await request(server)
+      .post("/admin/categories")
+      .set("Authorization", `Bearer ${klhToken}`)
+      .send({ name: `KLH-Only-${Date.now()}`, sortOrder: 1 });
+    await request(server)
+      .post("/admin/menu-items")
+      .set("Authorization", `Bearer ${klhToken}`)
+      .send({ name: "KLH Item", price: "5.00", stockQty: 5, categoryId: klhCat.body.id });
+
+    const drkCat = await request(server)
+      .post("/admin/categories")
+      .set("Authorization", `Bearer ${drkToken}`)
+      .send({ name: `DRK-Only-${Date.now()}`, sortOrder: 1 });
+    await request(server)
+      .post("/admin/menu-items")
+      .set("Authorization", `Bearer ${drkToken}`)
+      .send({ name: "DRK Item", price: "5.00", stockQty: 5, categoryId: drkCat.body.id });
+
+    const klhMenu = await request(server).get("/menu?school=KLH");
+    expect(klhMenu.status).toBe(200);
+    const klhNames = klhMenu.body.categories.map((c: any) => c.name);
+    expect(klhNames).toContain(klhCat.body.name);
+    expect(klhNames).not.toContain(drkCat.body.name);
+
+    const drkMenu = await request(server).get("/menu?school=DRK");
+    expect(drkMenu.status).toBe(200);
+    const drkNames = drkMenu.body.categories.map((c: any) => c.name);
+    expect(drkNames).toContain(drkCat.body.name);
+    expect(drkNames).not.toContain(klhCat.body.name);
+  });
+
+  it("blocks a DRK admin from bulk-updating a KLH category's items", async () => {
+    const klhToken = await makeAdminToken("KLH");
+    const drkToken = await makeAdminToken("DRK");
+
+    const catRes = await request(server)
+      .post("/admin/categories")
+      .set("Authorization", `Bearer ${klhToken}`)
+      .send({ name: "KLH Bulk", sortOrder: 1 });
+
+    const bulkRes = await request(server)
+      .patch(`/admin/categories/${catRes.body.id}/bulk-items`)
+      .set("Authorization", `Bearer ${drkToken}`)
+      .send({ isAvailable: false });
+
+    expect(bulkRes.status).toBe(403);
   });
 });

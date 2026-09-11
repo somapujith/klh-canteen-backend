@@ -45,6 +45,10 @@ export interface Category {
   name: string;
   sortOrder: number;
   kitchen: Kitchen;
+  /** Which school's menu this category belongs to. Independent of `kitchen`
+   *  (a food-station dimension) — KLH and DRK each build their own menu from
+   *  scratch, so a category never appears on the other school's board. */
+  school: School;
   /** Soft delete, for the same reason as MenuItem.isArchived — MenuItem's FK
    *  to Category is ON DELETE RESTRICT. Archiving a category archives its
    *  items with it. */
@@ -77,6 +81,10 @@ export interface MenuItem {
   categoryId: string;
   /** Position within its category, ascending — mirrors Category.sortOrder. */
   sortOrder: number;
+  /** Denormalized from the owning Category.school, kept in sync at write time
+   *  (see menuService.ts). Lets every kitchen-scoped MenuItem query stay a
+   *  single-table read instead of joining Category for school scoping. */
+  school: School;
 }
 
 export interface MenuItemImage {

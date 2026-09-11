@@ -50,7 +50,7 @@ adminMenuRouter.post("/categories", requireAuth("ADMIN"), async (c) => {
   const { name, sortOrder } = categorySchema.parse(await c.req.json());
   const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const category = await createCategory(pool, name, sortOrder, user.kitchen || "SNACKS");
+  const category = await createCategory(pool, name, sortOrder, user.kitchen || "SNACKS", user.school);
   return c.json(category, 201);
 });
 
@@ -59,7 +59,7 @@ adminMenuRouter.patch("/categories/:id", requireAuth("ADMIN"), async (c) => {
   const data = categorySchema.partial().parse(await c.req.json());
   const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const category = await updateCategory(pool, id, data, user.kitchen || undefined);
+  const category = await updateCategory(pool, id, data, user.kitchen || undefined, user.school);
   return c.json(category);
 });
 
@@ -67,7 +67,7 @@ adminMenuRouter.delete("/categories/:id", requireAuth("ADMIN"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));
   const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const { archivedItems } = await deleteCategory(pool, id, user.kitchen || undefined);
+  const { archivedItems } = await deleteCategory(pool, id, user.kitchen || undefined, user.school);
   await logAction(pool, user.id, "CATEGORY_DELETE", "Category", id, { archivedItems });
   // The cascade takes the category's items off the menu with it, so customers
   // holding a stale menu have to be told, exactly as the item delete does.
@@ -85,7 +85,7 @@ adminMenuRouter.patch("/categories/:id/bulk-items", requireAuth("ADMIN"), async 
   const data = bulkUpdateSchema.parse(await c.req.json());
   const pool = getRequestPool(c);
   const user = c.get("user")!;
-  await bulkUpdateCategoryItems(pool, id, data, user.kitchen || undefined);
+  await bulkUpdateCategoryItems(pool, id, data, user.kitchen || undefined, user.school);
   await logAction(pool, user.id, "CATEGORY_BULK_UPDATE", "Category", id, data);
   await sseService.broadcastMenuUpdate(getBindings(c));
   return c.json({ success: true });
@@ -95,7 +95,7 @@ adminMenuRouter.post("/menu-items", requireAuth("ADMIN"), async (c) => {
   const data = menuItemSchema.parse(await c.req.json());
   const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const item = await createMenuItem(pool, data, user.kitchen || undefined);
+  const item = await createMenuItem(pool, data, user.kitchen || undefined, user.school);
   await sseService.broadcastMenuUpdate(getBindings(c));
   return c.json(item, 201);
 });
@@ -105,7 +105,7 @@ adminMenuRouter.patch("/menu-items/:id", requireAuth("ADMIN"), async (c) => {
   const data = menuItemUpdateSchema.parse(await c.req.json());
   const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const item = await updateMenuItem(pool, id, data, user.kitchen || undefined);
+  const item = await updateMenuItem(pool, id, data, user.kitchen || undefined, user.school);
   await sseService.broadcastMenuUpdate(getBindings(c));
   return c.json(item);
 });
@@ -114,7 +114,7 @@ adminMenuRouter.delete("/menu-items/:id", requireAuth("ADMIN"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));
   const pool = getRequestPool(c);
   const user = c.get("user")!;
-  await deleteMenuItem(pool, id, user.kitchen || undefined);
+  await deleteMenuItem(pool, id, user.kitchen || undefined, user.school);
   await logAction(pool, user.id, "MENU_ITEM_DELETE", "MenuItem", id);
   await sseService.broadcastMenuUpdate(getBindings(c));
   return c.body(null, 204);
@@ -165,6 +165,7 @@ adminMenuRouter.post(
       declaredType: file.type,
       uploadedById: user.id,
       adminKitchen: user.kitchen || undefined,
+      adminSchool: user.school,
     });
     await logAction(pool, user.id, "MENU_ITEM_IMAGE_UPLOAD", "MenuItem", id);
     await sseService.broadcastMenuUpdate(getBindings(c));
@@ -207,7 +208,7 @@ adminMenuRouter.delete("/menu-items/:id/image", requireAuth("ADMIN"), async (c) 
   const id = idParamSchema.parse(c.req.param("id"));
   const pool = getRequestPool(c);
   const user = c.get("user")!;
-  await deleteMenuItemImage(pool, id, user.kitchen || undefined);
+  await deleteMenuItemImage(pool, id, user.kitchen || undefined, user.school);
   await logAction(pool, user.id, "MENU_ITEM_IMAGE_DELETE", "MenuItem", id);
   await sseService.broadcastMenuUpdate(getBindings(c));
   return c.body(null, 204);

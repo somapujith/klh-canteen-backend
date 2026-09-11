@@ -48,6 +48,18 @@ async function makeKitchenAdminToken(kitchen: "SNACKS" | "MEALS") {
   return { id: admin.id, token: signToken({ sub: admin.id, role: "ADMIN", kitchen }, process.env.JWT_SECRET!) };
 }
 
+async function makeSchoolAdminToken(school: "KLH" | "DRK") {
+  const passwordHash = await bcrypt.hash("x", 12);
+  const admin = await userRepo.insert(pool, {
+    role: "ADMIN",
+    email: `admin-${school}-${Date.now()}-${Math.random()}@klh.edu.in`,
+    passwordHash,
+    name: "A",
+    school,
+  });
+  return { id: admin.id, token: signToken({ sub: admin.id, role: "ADMIN" }, process.env.JWT_SECRET!) };
+}
+
 async function makeStudentToken() {
   const passwordHash = await bcrypt.hash("x", 12);
   const student = await userRepo.insert(pool, {
@@ -66,6 +78,7 @@ async function makeItem(stockQty: number) {
     name: `Cat-${Date.now()}-${Math.random()}`,
     sortOrder: 1,
     kitchen: "SNACKS",
+    school: "KLH",
   });
   return menuItemRepo.insertMenuItem(pool, {
     name: "Tea",
@@ -73,6 +86,7 @@ async function makeItem(stockQty: number) {
     price: "10.00",
     stockQty,
     categoryId: category.id,
+    school: "KLH",
   });
 }
 
@@ -216,6 +230,32 @@ describeDb("Admin order board", () => {
         .get(`/admin/orders/${orderId}`)
         .set("Authorization", `Bearer ${studentToken}`);
       expect(res.status).toBe(403);
+    });
+
+    it("refuses a school-scoped admin opening another school's order, without mutating it", async () => {
+      // Regression: admin order queries filtered by kitchen (SNACKS/MEALS)
+      // but never by school, so a DRK admin could open/lock/transition KLH
+      // orders and vice versa. seedOrder() defaults to school "KLH", so an
+      // admin from "DRK" must be refused.
+      const admin = await makeSchoolAdminToken("DRK");
+      const item = await makeItem(5);
+      const order = await seedOrder({
+        menuItemId: item.id,
+        kitchen: "SNACKS",
+        school: "KLH",
+      });
+
+      const res = await request(server)
+        .get(`/admin/orders/${order.id}`)
+        .set("Authorization", `Bearer ${admin.token}`);
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe("INVALID_SCHOOL");
+
+      // Same no-op-write guarantee as the kitchen-mismatch case: a rejected
+      // admin must not mark the order seen or claim its lock.
+      const dbOrder = await findOrder(order.id);
+      expect(dbOrder?.seenByAdmin).toBe(false);
+      expect(dbOrder?.lockedByAdminId).toBeNull();
     });
 
     it("rejects PENDING -> PREPARING now that the board is a two-step flow", async () => {
@@ -442,6 +482,28 @@ describeDb("Admin order board", () => {
         .set("Authorization", `Bearer ${studentToken}`)
         .send({ status: "COOKED" });
       expect(res.status).toBe(403);
+    });
+
+    it("refuses a school-scoped admin updating another school's order status", async () => {
+      // Same tenant-isolation regression as the GET /:id case, on the status
+      // transition path. seedOrder() defaults to school "KLH".
+      const admin = await makeSchoolAdminToken("DRK");
+      const item = await makeItem(5);
+      const order = await seedOrder({
+        menuItemId: item.id,
+        kitchen: "SNACKS",
+        school: "KLH",
+      });
+
+      const res = await request(server)
+        .patch(`/admin/orders/${order.id}/status`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ status: "COOKED" });
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe("INVALID_SCHOOL");
+
+      const dbOrder = await findOrder(order.id);
+      expect(dbOrder?.status).toBe("PENDING");
     });
 
     it("delivers 20 concurrent status-update requests for an order already at COOKED exactly once, decrementing stock exactly once", async () => {

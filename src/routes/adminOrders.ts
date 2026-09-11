@@ -87,6 +87,7 @@ adminOrdersRouter.get("/", requireAuth("ADMIN"), async (c) => {
 
   const page = await getAllOrders(pool, {
     kitchen: user.kitchen || undefined,
+    school: user.school,
     statuses,
     includeDelivered,
     cursor: query.cursor,
@@ -123,7 +124,7 @@ adminOrdersRouter.get("/:id", requireAuth("ADMIN"), async (c) => {
   const id = idParamSchema.parse(c.req.param("id"));
   const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const order = await openOrderForAdmin(pool, id, user.id, user.kitchen || undefined);
+  const order = await openOrderForAdmin(pool, id, user.id, user.kitchen || undefined, user.school);
   // Broadcasting "seen" to the rest of the kitchen board is a side effect for
   // OTHER admins' screens, not something the clicking admin's own response
   // depends on. Blocking their response on that Durable Object round-trip
@@ -152,7 +153,7 @@ adminOrdersRouter.patch("/:id/status", requireAuth("ADMIN"), async (c) => {
   const { status } = statusBodySchema.parse(await c.req.json());
   const pool = getRequestPool(c);
   const user = c.get("user")!;
-  const order = await updateOrderStatus(pool, id, status, user.kitchen || undefined);
+  const order = await updateOrderStatus(pool, id, status, user.kitchen || undefined, user.school);
   if (!user.kitchen || user.kitchen !== order.kitchen) {
     await logAction(pool, user.id, "ORDER_STATUS_OVERRIDE", "Order", order.id, { kitchen: order.kitchen, status });
   }

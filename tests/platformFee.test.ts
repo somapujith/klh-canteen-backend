@@ -59,6 +59,7 @@ async function makeItem(price: string, stockQty = 10) {
     name: `Cat-${Date.now()}-${Math.random()}`,
     sortOrder: 1,
     kitchen: "SNACKS",
+    school: "KLH",
   });
   return menuItemRepo.insertMenuItem(pool, {
     name: "Tea",
@@ -66,6 +67,7 @@ async function makeItem(price: string, stockQty = 10) {
     price,
     stockQty,
     categoryId: category.id,
+    school: "KLH",
   });
 }
 

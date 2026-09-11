@@ -14,16 +14,17 @@ import { sql, joinSql, raw, query, type QueryRunner } from "./sql.js";
 import type { SqlFragment } from "./sql.js";
 import { assertAffected } from "./errors.js";
 import { withTransaction } from "./tx.js";
-import type { Category, Kitchen } from "./schema.js";
+import type { Category, Kitchen, School } from "./schema.js";
 
 export type Runner = Pool | PoolClient | QueryRunner;
 
-const ALL_COLUMNS = `"id", "name", "sortOrder", "kitchen", "isArchived"`;
+const ALL_COLUMNS = `"id", "name", "sortOrder", "kitchen", "isArchived", "school"`;
 
 export interface CategoryCreateInput {
   name: string;
   sortOrder: number;
   kitchen: Kitchen;
+  school: School;
 }
 
 export interface CategoryUpdateInput {
@@ -32,16 +33,18 @@ export interface CategoryUpdateInput {
 }
 
 /**
- * All categories, optionally scoped to one kitchen, ordered the same way
- * `prisma.category.findMany({ orderBy: { sortOrder: "asc" } })` was.
+ * All categories, optionally scoped to one kitchen and/or one school, ordered
+ * the same way `prisma.category.findMany({ orderBy: { sortOrder: "asc" } })`
+ * was.
  */
-export async function findCategories(runner: Runner, kitchen?: Kitchen): Promise<Category[]> {
+export async function findCategories(runner: Runner, kitchen?: Kitchen, school?: School): Promise<Category[]> {
   const kitchenFilter = kitchen ? sql`AND "kitchen" = ${kitchen}` : sql``;
+  const schoolFilter = school ? sql`AND "school" = ${school}` : sql``;
   const { rows } = await query<Category>(
     runner,
     sql`
       SELECT ${raw(ALL_COLUMNS)} FROM "Category"
-      WHERE "isArchived" = false ${kitchenFilter}
+      WHERE "isArchived" = false ${kitchenFilter} ${schoolFilter}
       ORDER BY "sortOrder" ASC
     `
   );
@@ -60,8 +63,8 @@ export async function insertCategory(runner: Runner, data: CategoryCreateInput):
   const { rows } = await query<Category>(
     runner,
     sql`
-      INSERT INTO "Category" ("id", "name", "sortOrder", "kitchen")
-      VALUES (${crypto.randomUUID()}, ${data.name}, ${data.sortOrder}, ${data.kitchen})
+      INSERT INTO "Category" ("id", "name", "sortOrder", "kitchen", "school")
+      VALUES (${crypto.randomUUID()}, ${data.name}, ${data.sortOrder}, ${data.kitchen}, ${data.school})
       RETURNING ${raw(ALL_COLUMNS)}
     `
   );

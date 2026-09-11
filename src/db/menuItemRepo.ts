@@ -11,12 +11,12 @@ import type { Pool, PoolClient } from "@neondatabase/serverless";
 import { sql, joinSql, raw, query, type QueryRunner } from "./sql.js";
 import type { SqlFragment } from "./sql.js";
 import { assertAffected } from "./errors.js";
-import type { Kitchen, MenuItem } from "./schema.js";
+import type { Kitchen, MenuItem, School } from "./schema.js";
 
 export type Runner = Pool | PoolClient | QueryRunner;
 
 const ALL_COLUMNS = `
-  "id", "name", "imageUrl", "imageHash", "price", "stockQty", "reservedQty", "isAvailable", "isArchived", "categoryId", "sortOrder", "servingInfo", "servingInfoVisible"
+  "id", "name", "imageUrl", "imageHash", "price", "stockQty", "reservedQty", "isAvailable", "isArchived", "categoryId", "sortOrder", "servingInfo", "servingInfoVisible", "school"
 `;
 
 export interface MenuItemCreateInput {
@@ -28,6 +28,7 @@ export interface MenuItemCreateInput {
   sortOrder?: number;
   servingInfo?: string | null;
   servingInfoVisible?: boolean;
+  school: School;
 }
 
 export interface MenuItemUpdateInput {
@@ -56,15 +57,16 @@ export interface MenuItemUpdateInput {
 export async function findMenuItemsByCategoryIds(
   runner: Runner,
   categoryIds: string[],
-  opts: { availableOnly?: boolean } = {}
+  opts: { availableOnly?: boolean; school?: School } = {}
 ): Promise<MenuItem[]> {
   if (categoryIds.length === 0) return [];
   const availableFilter = opts.availableOnly ? sql`AND "isAvailable" = true` : sql``;
+  const schoolFilter = opts.school ? sql`AND "school" = ${opts.school}` : sql``;
   const { rows } = await query<MenuItem>(
     runner,
     sql`
       SELECT ${raw(ALL_COLUMNS)} FROM "MenuItem"
-      WHERE "categoryId" = ANY(${categoryIds}) AND "isArchived" = false ${availableFilter}
+      WHERE "categoryId" = ANY(${categoryIds}) AND "isArchived" = false ${availableFilter} ${schoolFilter}
       ORDER BY "sortOrder" ASC, "id" ASC
     `
   );
@@ -88,13 +90,13 @@ export async function findMenuItemById(runner: Runner, id: string): Promise<Menu
 export async function findMenuItemWithCategoryKitchen(
   runner: Runner,
   id: string
-): Promise<{ item: MenuItem; categoryKitchen: Kitchen } | null> {
-  const { rows } = await query<MenuItem & { categoryKitchen: Kitchen }>(
+): Promise<{ item: MenuItem; categoryKitchen: Kitchen; categorySchool: School } | null> {
+  const { rows } = await query<MenuItem & { categoryKitchen: Kitchen; categorySchool: School }>(
     runner,
     sql`
       SELECT mi."id", mi."name", mi."imageUrl", mi."imageHash", mi."price", mi."stockQty", mi."reservedQty",
-             mi."isAvailable", mi."isArchived", mi."categoryId", mi."sortOrder", mi."servingInfo", mi."servingInfoVisible",
-             c."kitchen" AS "categoryKitchen"
+             mi."isAvailable", mi."isArchived", mi."categoryId", mi."sortOrder", mi."servingInfo", mi."servingInfoVisible", mi."school",
+             c."kitchen" AS "categoryKitchen", c."school" AS "categorySchool"
       FROM "MenuItem" mi
       JOIN "Category" c ON c."id" = mi."categoryId"
       WHERE mi."id" = ${id} AND mi."isArchived" = false
@@ -102,16 +104,16 @@ export async function findMenuItemWithCategoryKitchen(
   );
   const row = rows[0];
   if (!row) return null;
-  const { categoryKitchen, ...item } = row;
-  return { item, categoryKitchen };
+  const { categoryKitchen, categorySchool, ...item } = row;
+  return { item, categoryKitchen, categorySchool };
 }
 
 export async function insertMenuItem(runner: Runner, data: MenuItemCreateInput): Promise<MenuItem> {
   const { rows } = await query<MenuItem>(
     runner,
     sql`
-      INSERT INTO "MenuItem" ("id", "name", "imageUrl", "price", "stockQty", "categoryId", "sortOrder", "servingInfo", "servingInfoVisible")
-      VALUES (${crypto.randomUUID()}, ${data.name}, ${data.imageUrl}, ${data.price}, ${data.stockQty}, ${data.categoryId}, ${data.sortOrder ?? 0}, ${data.servingInfo ?? null}, ${data.servingInfoVisible ?? false})
+      INSERT INTO "MenuItem" ("id", "name", "imageUrl", "price", "stockQty", "categoryId", "sortOrder", "servingInfo", "servingInfoVisible", "school")
+      VALUES (${crypto.randomUUID()}, ${data.name}, ${data.imageUrl}, ${data.price}, ${data.stockQty}, ${data.categoryId}, ${data.sortOrder ?? 0}, ${data.servingInfo ?? null}, ${data.servingInfoVisible ?? false}, ${data.school})
       RETURNING ${raw(ALL_COLUMNS)}
     `
   );

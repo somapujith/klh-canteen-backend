@@ -37,7 +37,13 @@ function uid(prefix: string): string {
 export const TEST_PASSWORD = "correct-horse-battery";
 
 export async function createStudent(
-  overrides: Partial<{ name: string; rollNumber: string; email: string; password: string }> = {},
+  overrides: Partial<{
+    name: string;
+    rollNumber: string;
+    email: string;
+    password: string;
+    school: "KLH" | "DRK";
+  }> = {},
 ) {
   const password = overrides.password ?? TEST_PASSWORD;
   const student = await userRepo.insert(getTestPool(), {
@@ -46,13 +52,19 @@ export async function createStudent(
     rollNumber: overrides.rollNumber ?? uid("R"),
     email: overrides.email ?? `${uid("student")}@klh.edu.in`,
     passwordHash: await bcrypt.hash(password, 4),
-    school: "KLH",
+    school: overrides.school ?? "KLH",
   });
   return { ...student, password };
 }
 
 export async function createAdmin(
-  overrides: Partial<{ name: string; email: string; password: string; kitchen: "SNACKS" | "MEALS" }> = {},
+  overrides: Partial<{
+    name: string;
+    email: string;
+    password: string;
+    kitchen: "SNACKS" | "MEALS";
+    school: "KLH" | "DRK";
+  }> = {},
 ) {
   const password = overrides.password ?? TEST_PASSWORD;
   const admin = await userRepo.insert(getTestPool(), {
@@ -61,7 +73,7 @@ export async function createAdmin(
     email: overrides.email ?? `${uid("admin")}@klh.edu.in`,
     passwordHash: await bcrypt.hash(password, 4),
     kitchen: overrides.kitchen ?? null,
-    school: "KLH",
+    school: overrides.school ?? "KLH",
   });
   return { ...admin, password };
 }
@@ -81,6 +93,7 @@ export async function createMenuItem(
     name: uid("Category"),
     sortOrder: 1,
     kitchen: options.kitchen ?? "SNACKS",
+    school: "KLH",
   });
   return menuItemRepo.insertMenuItem(pool, {
     name: options.name ?? "Samosa",
@@ -88,6 +101,7 @@ export async function createMenuItem(
     price: options.price ?? "20.00",
     stockQty: options.stockQty ?? 100,
     categoryId: category.id,
+    school: "KLH",
   });
 }
 
@@ -116,6 +130,7 @@ export async function seedOrder(options: {
   price?: string;
   status?: "PENDING" | "PREPARING" | "COOKED" | "DELIVERED";
   kitchen?: "SNACKS" | "MEALS";
+  school?: "KLH" | "DRK";
   createdAt?: Date;
   collectionAt?: Date | null;
 }) {
@@ -130,13 +145,14 @@ export async function seedOrder(options: {
     sql`
       INSERT INTO "Order" (
         "id", "studentId", "guestSessionId", "guestName", "guestPhone",
-        "status", "kitchen", "token", "orderNumber", "totalAmount",
+        "status", "kitchen", "school", "token", "orderNumber", "totalAmount",
         "createdAt", "collectionAt"
       )
       VALUES (
         ${orderId}, ${options.studentId ?? null}, ${options.guestSessionId ?? null},
         ${options.guestName ?? null}, ${options.guestPhone ?? null},
         ${(options.status ?? "PENDING")}::"OrderStatus", ${(options.kitchen ?? "SNACKS")}::"Kitchen",
+        ${(options.school ?? "KLH")}::"School",
         ${uid("order-token")}, ${1000 + (unique % 8000)}, ${(Number(price) * qty).toFixed(2)},
         ${options.createdAt ? options.createdAt.toISOString() : new Date().toISOString()}::timestamp,
         ${options.collectionAt ? options.collectionAt.toISOString() : null}::timestamp

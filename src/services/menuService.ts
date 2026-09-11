@@ -2,7 +2,7 @@ import type { Pool, PoolClient } from "@neondatabase/serverless";
 import { ApiError } from "../middleware/errorHandler.js";
 import * as categoryRepo from "../db/categoryRepo.js";
 import * as menuItemRepo from "../db/menuItemRepo.js";
-import type { Category, Kitchen, MenuItem } from "../db/schema.js";
+import type { Category, Kitchen, MenuItem, School } from "../db/schema.js";
 import type { QueryRunner } from "../db/sql.js";
 
 // Widened to accept lib/db.ts's HTTP getHttpSql() client alongside Pool/
@@ -46,13 +46,14 @@ type Runner = Pool | PoolClient | QueryRunner;
  * a trivial join (see auditLogRepo's doc comment for the one place a single
  * JOIN was chosen instead, and why).
  */
-export async function getCategorizedMenu(runner: Runner, kitchen?: string, isAdmin?: boolean) {
-  const categories = await categoryRepo.findCategories(runner, kitchen as Kitchen | undefined);
+export async function getCategorizedMenu(runner: Runner, kitchen?: string, isAdmin?: boolean, school?: string) {
+  const categories = await categoryRepo.findCategories(runner, kitchen as Kitchen | undefined, school as School | undefined);
   const categoryIds = categories.map((c) => c.id);
   // An admin must see the items they have switched off — hiding one is
   // reversible only if it is still on the page that hid it.
   const items = await menuItemRepo.findMenuItemsByCategoryIds(runner, categoryIds, {
     availableOnly: !isAdmin,
+    school: school as School | undefined,
   });
 
   const itemsByCategory = new Map<string, MenuItem[]>();
@@ -92,21 +93,29 @@ export async function createCategory(
   runner: Runner,
   name: string,
   sortOrder: number,
-  kitchen: Kitchen | string = "SNACKS"
+  kitchen: Kitchen | string = "SNACKS",
+  school: School | string = "KLH"
 ): Promise<Category> {
-  return categoryRepo.insertCategory(runner, { name, sortOrder, kitchen: kitchen as Kitchen });
+  // A category's school is always the creating admin's own school — never a
+  // separate caller-supplied field. This is what stops an admin from ever
+  // planting a category on another school's menu.
+  return categoryRepo.insertCategory(runner, { name, sortOrder, kitchen: kitchen as Kitchen, school: school as School });
 }
 
 export async function updateCategory(
   runner: Runner,
   id: string,
   data: { name?: string; sortOrder?: number },
-  adminKitchen?: string | null
+  adminKitchen?: string | null,
+  adminSchool?: string | null
 ): Promise<Category> {
   const existing = await categoryRepo.findCategoryById(runner, id);
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Category not found");
   if (adminKitchen && existing.kitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to modify this category.");
+  }
+  if (adminSchool && existing.school !== adminSchool) {
+    throw new ApiError(403, "INVALID_SCHOOL", "You do not have permission to modify this school's menu.");
   }
   return categoryRepo.updateCategory(runner, id, data);
 }
@@ -122,12 +131,16 @@ export async function updateCategory(
 export async function deleteCategory(
   pool: Pool,
   id: string,
-  adminKitchen?: string | null
+  adminKitchen?: string | null,
+  adminSchool?: string | null
 ): Promise<{ archivedItems: number }> {
   const existing = await categoryRepo.findCategoryById(pool, id);
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Category not found");
   if (adminKitchen && existing.kitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to delete this category.");
+  }
+  if (adminSchool && existing.school !== adminSchool) {
+    throw new ApiError(403, "INVALID_SCHOOL", "You do not have permission to delete this school's menu.");
   }
   return categoryRepo.archiveCategoryWithItems(pool, id);
 }
@@ -144,16 +157,22 @@ export async function createMenuItem(
     servingInfo?: string | null;
     servingInfoVisible?: boolean;
   },
-  adminKitchen?: string | null
+  adminKitchen?: string | null,
+  adminSchool?: string | null
 ): Promise<MenuItem> {
-  if (adminKitchen) {
-    const category = await categoryRepo.findCategoryById(runner, data.categoryId);
-    if (!category) throw new ApiError(404, "NOT_FOUND", "Category not found");
-    if (category.kitchen !== adminKitchen) {
-      throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to add items to this category.");
-    }
+  // Always fetch the category — not just when an ownership check is active —
+  // because a menu item's `school` is always denormalized from its owning
+  // category, unconditionally, regardless of whether adminKitchen/adminSchool
+  // checks apply to this particular call.
+  const category = await categoryRepo.findCategoryById(runner, data.categoryId);
+  if (!category) throw new ApiError(404, "NOT_FOUND", "Category not found");
+  if (adminKitchen && category.kitchen !== adminKitchen) {
+    throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to add items to this category.");
   }
-  return menuItemRepo.insertMenuItem(runner, data);
+  if (adminSchool && category.school !== adminSchool) {
+    throw new ApiError(403, "INVALID_SCHOOL", "You do not have permission to add items to this category.");
+  }
+  return menuItemRepo.insertMenuItem(runner, { ...data, school: category.school });
 }
 
 export async function updateMenuItem(
@@ -170,12 +189,16 @@ export async function updateMenuItem(
     servingInfo: string | null;
     servingInfoVisible: boolean;
   }>,
-  adminKitchen?: string | null
+  adminKitchen?: string | null,
+  adminSchool?: string | null
 ): Promise<MenuItem> {
   const existing = await menuItemRepo.findMenuItemWithCategoryKitchen(runner, id);
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Menu item not found");
   if (adminKitchen && existing.categoryKitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to modify this menu item.");
+  }
+  if (adminSchool && existing.categorySchool !== adminSchool) {
+    throw new ApiError(403, "INVALID_SCHOOL", "You do not have permission to modify this school's menu.");
   }
   return menuItemRepo.updateMenuItem(runner, id, data);
 }
@@ -185,11 +208,19 @@ export async function updateMenuItem(
  * a real DELETE impossible for any item that has ever been ordered, and order
  * history has to keep resolving the item it names. See MenuItem.isArchived.
  */
-export async function deleteMenuItem(runner: Runner, id: string, adminKitchen?: string | null): Promise<void> {
+export async function deleteMenuItem(
+  runner: Runner,
+  id: string,
+  adminKitchen?: string | null,
+  adminSchool?: string | null
+): Promise<void> {
   const existing = await menuItemRepo.findMenuItemWithCategoryKitchen(runner, id);
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Menu item not found");
   if (adminKitchen && existing.categoryKitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to delete this menu item.");
+  }
+  if (adminSchool && existing.categorySchool !== adminSchool) {
+    throw new ApiError(403, "INVALID_SCHOOL", "You do not have permission to delete this school's menu.");
   }
   await menuItemRepo.archiveMenuItem(runner, id);
 }
@@ -198,12 +229,16 @@ export async function bulkUpdateCategoryItems(
   runner: Runner,
   categoryId: string,
   data: Partial<{ isAvailable: boolean; stockQty: number }>,
-  adminKitchen?: string | null
+  adminKitchen?: string | null,
+  adminSchool?: string | null
 ): Promise<{ count: number }> {
   const category = await categoryRepo.findCategoryById(runner, categoryId);
   if (!category) throw new ApiError(404, "NOT_FOUND", "Category not found");
   if (adminKitchen && category.kitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to modify this category's items.");
+  }
+  if (adminSchool && category.school !== adminSchool) {
+    throw new ApiError(403, "INVALID_SCHOOL", "You do not have permission to modify this school's menu.");
   }
   const count = await menuItemRepo.updateMenuItemsByCategory(runner, categoryId, data);
   return { count };

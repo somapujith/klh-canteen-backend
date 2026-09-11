@@ -263,6 +263,25 @@ describeDb("GET /admin/orders — active-only default", () => {
     expect(ids).toContain(mine.id);
     expect(ids).not.toContain(theirs.id);
   });
+
+  it("scopes a school-bound admin to their own school, even when kitchens match", async () => {
+    // Regression: order queries filtered by kitchen (a food-station
+    // dimension) but never by school (a tenant dimension), so a DRK admin
+    // could see KLH orders and vice versa. Same kitchen on both orders here
+    // isolates the assertion to the school filter specifically.
+    const klhAdmin = await createAdmin({ school: "KLH" });
+    const auth = `Bearer ${tokenFor(klhAdmin)}`;
+    const item = await createMenuItem();
+    const student = await createStudent();
+    const mine = await seedOrder({ studentId: student.id, menuItemId: item.id, school: "KLH" });
+    const theirs = await seedOrder({ studentId: student.id, menuItemId: item.id, school: "DRK" });
+
+    const res = await request(server).get("/admin/orders").set("Authorization", auth);
+    const ids = res.body.map((o: any) => o.id);
+
+    expect(ids).toContain(mine.id);
+    expect(ids).not.toContain(theirs.id);
+  });
 });
 
 /**

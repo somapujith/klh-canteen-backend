@@ -15,9 +15,10 @@ export const menuRouter = new Hono<AppEnv>();
 // handshake per request the way Pool needs on Workers (see lib/db.ts).
 menuRouter.get("/", async (c) => {
   const kitchen = c.req.query("kitchen");
+  const school = c.req.query("school");
   const isAdmin = c.req.query("admin") === "true";
   const httpSql = getHttpSql(getBindings(c).DATABASE_URL);
-  const menu = await getCategorizedMenu(httpSql, kitchen, isAdmin);
+  const menu = await getCategorizedMenu(httpSql, kitchen, isAdmin, school);
   return c.json(menu);
 });
 

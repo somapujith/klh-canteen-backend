@@ -152,6 +152,7 @@ export interface UploadImageInput {
   declaredType: string;
   uploadedById: string;
   adminKitchen?: string | null;
+  adminSchool?: string | null;
 }
 
 export interface UploadImageResult {
@@ -187,6 +188,9 @@ export async function uploadMenuItemImage(pool: Pool, input: UploadImageInput): 
   if (input.adminKitchen && existing.categoryKitchen !== input.adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to modify this menu item.");
   }
+  if (input.adminSchool && existing.categorySchool !== input.adminSchool) {
+    throw new ApiError(403, "INVALID_SCHOOL", "You do not have permission to modify this school's menu.");
+  }
 
   const hash = await hashImage(input.bytes);
   await menuItemImageRepo.putImage(pool, {
@@ -202,11 +206,19 @@ export async function uploadMenuItemImage(pool: Pool, input: UploadImageInput): 
   return { imageHash: hash, mimeType: sniffed.mimeType, width: sniffed.width, height: sniffed.height, byteSize: input.bytes.byteLength };
 }
 
-export async function deleteMenuItemImage(pool: Pool, menuItemId: string, adminKitchen?: string | null): Promise<void> {
+export async function deleteMenuItemImage(
+  pool: Pool,
+  menuItemId: string,
+  adminKitchen?: string | null,
+  adminSchool?: string | null
+): Promise<void> {
   const existing = await menuItemRepo.findMenuItemWithCategoryKitchen(pool, menuItemId);
   if (!existing) throw new ApiError(404, "NOT_FOUND", "Menu item not found");
   if (adminKitchen && existing.categoryKitchen !== adminKitchen) {
     throw new ApiError(403, "INVALID_KITCHEN", "You do not have permission to modify this menu item.");
+  }
+  if (adminSchool && existing.categorySchool !== adminSchool) {
+    throw new ApiError(403, "INVALID_SCHOOL", "You do not have permission to modify this school's menu.");
   }
   await menuItemImageRepo.deleteImage(pool, menuItemId);
 }

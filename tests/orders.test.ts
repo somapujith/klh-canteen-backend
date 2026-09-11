@@ -29,13 +29,19 @@ async function makeStudent() {
 }
 
 async function makeItem(stockQty = 10) {
-  const category = await categoryRepo.insertCategory(pool, { name: `Cat-${Date.now()}`, sortOrder: 1, kitchen: "SNACKS" });
+  const category = await categoryRepo.insertCategory(pool, {
+    name: `Cat-${Date.now()}`,
+    sortOrder: 1,
+    kitchen: "SNACKS",
+    school: "KLH",
+  });
   return menuItemRepo.insertMenuItem(pool, {
     name: "Tea",
     imageUrl: "https://x.com/tea.jpg",
     price: "10.00",
     stockQty,
     categoryId: category.id,
+    school: "KLH",
   });
 }
 
