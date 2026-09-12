@@ -7,6 +7,11 @@ export interface AdminPaymentStats {
   thisMonthTotal: string;
   commission: string;
   commissionPercent: number;
+  itemBreakdown: {
+    itemName: string;
+    qtySold: number;
+    commission: string;
+  }[];
 }
 
 export interface PaginatedAdminPayments {
@@ -27,14 +32,10 @@ export interface AdminPaymentRow {
 
 export async function getAdminPaymentStats(pool: Pool, school: School): Promise<AdminPaymentStats> {
   const percent = await getPlatformFeePercent(pool, school);
-  // Default to 3 for KLH, 2 for DRK if not set? Wait, if 0 is returned, maybe we use 0. 
-  // Let's use the DB value if set, else hardcode the fallback user wants just in case, or maybe just trust DB.
-  // The user says "as KLH have 3% and DRK have 2% accordingly". I will hardcode the fallback:
   const actualPercent = percent > 0 ? percent : (school === "KLH" ? 3 : 2);
 
-  // This month's successful payments
-  // We need to join Payment with Order to filter by school.
-  const { rows } = await query<{ total: string }>(
+  // This month's successful payments total
+  const { rows: totalRows } = await query<{ total: string }>(
     pool,
     sql`
       SELECT COALESCE(SUM(p."amount"), 0) AS total
@@ -47,13 +48,44 @@ export async function getAdminPaymentStats(pool: Pool, school: School): Promise<
     `
   );
 
-  const total = Number(rows[0]?.total || 0);
-  const commissionValue = (total * actualPercent) / 100;
+  const total = Number(totalRows[0]?.total || 0);
+  const totalCommission = (total * actualPercent) / 100;
+
+  // Breakdown by item
+  const { rows: itemRows } = await query<{ itemName: string, qtySold: string, itemTotal: string }>(
+    pool,
+    sql`
+      SELECT 
+        mi."name" as "itemName",
+        SUM(oi."quantity") as "qtySold",
+        SUM(oi."quantity" * oi."priceAtOrder") as "itemTotal"
+      FROM "OrderItem" oi
+      JOIN "MenuItem" mi ON mi."id" = oi."menuItemId"
+      JOIN "Order" o ON o."id" = oi."orderId"
+      JOIN "Payment" p ON p."id" = o."paymentId"
+      WHERE p."status" = 'SUCCESS'
+        AND date_trunc('month', p."createdAt") = date_trunc('month', CURRENT_DATE)
+        AND o."school" = ${school}::"School"
+      GROUP BY mi."id", mi."name"
+      ORDER BY "itemTotal" DESC
+    `
+  );
+
+  const itemBreakdown = itemRows.map(row => {
+    const itemTotalRevenue = Number(row.itemTotal || 0);
+    const itemComm = (itemTotalRevenue * actualPercent) / 100;
+    return {
+      itemName: row.itemName,
+      qtySold: Number(row.qtySold || 0),
+      commission: itemComm.toFixed(2)
+    };
+  });
 
   return {
     thisMonthTotal: total.toFixed(2),
-    commission: commissionValue.toFixed(2),
+    commission: totalCommission.toFixed(2),
     commissionPercent: actualPercent,
+    itemBreakdown
   };
 }
 
