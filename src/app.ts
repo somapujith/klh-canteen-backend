@@ -10,6 +10,7 @@ import { adminStudentsRouter } from "./routes/adminStudents.js";
 import { ordersRouter } from "./routes/orders.js";
 import { guestRouter } from "./routes/guest.js";
 import { adminOrdersRouter } from "./routes/adminOrders.js";
+import { adminPaymentsRouter } from "./routes/adminPayments.js";
 import { eventsRouter } from "./routes/events.js";
 import { superAdminRouter } from "./routes/superadmin.js";
 import { superAdminUsersRouter } from "./routes/superadminUsers.js";
@@ -132,6 +133,7 @@ export function createApp() {
   // see the security note at the top of routes/guest.ts.
   app.route("/guest", guestRouter);
   app.route("/admin/orders", adminOrdersRouter);
+  app.route("/admin/payments", adminPaymentsRouter);
   app.route("/events", eventsRouter);
   app.route("/superadmin", superAdminRouter);
   app.route("/superadmin/users", superAdminUsersRouter);
